@@ -27,7 +27,7 @@
   ],
   "author": "yulinzhao",
   "license": "MIT",
-  "description": "将dist目录下的文件上传到阿里云oss",
+  "description": "将dist目录下的文件上传到ftp服务器",
   "devDependencies": {
     "@types/node": "^22.10.1",
     "tsup": "^8.3.5",
