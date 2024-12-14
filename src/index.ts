@@ -39,6 +39,13 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
           return
         }
+
+        let [protocol, other] = (alias || '://').split('://')
+
+        if (protocol) {
+          protocol = protocol + '://'
+        }
+
         const ftpUploadChoice = await select({
           message: '是否上传FTP',
           choices: ['是', '否'],
@@ -59,21 +66,27 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         uploadSpinner.color = 'blue'
         uploadSpinner.text = '连接成功'
         const fileList = await client.list(uploadPath)
-        uploadSpinner.succeed(`已连接 ${chalk.green(`目录: ==> ${alias}${uploadPath}`)}`)
+        uploadSpinner.succeed(
+          `已连接 ${chalk.green(`目录: ==> ${protocol + normalizePath(other + uploadPath)}`)}`
+        )
         if (fileList.length) {
-          await createBackupFile(client, uploadPath, alias)
+          await createBackupFile(client, uploadPath, protocol, other)
         }
         const uploadFileSpinner = ora('上传中...').start()
         await client.uploadFromDir(outDir, uploadPath)
-        uploadFileSpinner.succeed('上传成功 url:' + chalk.green(`${alias}${uploadPath}/`))
+        uploadFileSpinner.succeed(
+          '上传成功 url:' + chalk.green(`${protocol + normalizePath(other + uploadPath)}`)
+        )
         client.close()
       },
     },
   }
 }
 
-async function createBackupFile(client: Client, dir: string, alias: string) {
-  const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`目录: ==> ${alias}${dir}`)}`).start()
+async function createBackupFile(client: Client, dir: string, protocol: string, other: string) {
+  const backupSpinner = ora(
+    `创建备份文件中 ${chalk.yellow(`目录: ==> ${protocol + normalizePath(other + dir)}`)}`
+  ).start()
 
   const fileName = `backup_${dayjs().format('YYYYMMDD_HHmmss')}.zip`
 
@@ -84,7 +97,9 @@ async function createBackupFile(client: Client, dir: string, alias: string) {
     fs.mkdirSync(localDir, { recursive: true })
   }
   await client.downloadToDir(localDir, dir)
-  backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`目录: ==> ${alias}${dir}`)}`
+  backupSpinner.text = `下载远程文件成功 ${chalk.yellow(
+    `目录: ==> ${protocol + normalizePath(other + dir)}`
+  )}`
 
   fs.readdirSync(localDir).forEach((i) => {
     if (i.startsWith('backup_') && i.endsWith('.zip')) {
@@ -110,12 +125,14 @@ async function createBackupFile(client: Client, dir: string, alias: string) {
   archive.directory(localDir, false)
   await archive.finalize()
   backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(
-    `目录: ==> ${normalizePath(`${alias}${dir}/${fileName}`)}`
+    `目录: ==> ${normalizePath(`${protocol + normalizePath(other + dir + '/' + fileName)}`)}`
   )}`
 
   await client.uploadFrom(zipFilePath, normalizePath(`${dir}/${fileName}`))
   backupSpinner.succeed(
-    `备份成功 ${chalk.green(`目录: ==> ${normalizePath(`${alias}${dir}/${fileName}`)}`)}`
+    `备份成功 ${chalk.green(
+      `目录: ==> ${normalizePath(`${protocol + normalizePath(other + dir + '/' + fileName)}`)}`
+    )}`
   )
 
   fs.rmSync(`./__temp`, { recursive: true })
