@@ -125,14 +125,12 @@ async function createBackupFile(client: Client, dir: string, protocol: string, o
   archive.directory(localDir, false)
   await archive.finalize()
   backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(
-    `目录: ==> ${normalizePath(`${protocol + normalizePath(other + dir + '/' + fileName)}`)}`
+    `目录: ==> ${protocol + normalizePath(other + dir + '/' + fileName)}`
   )}`
 
   await client.uploadFrom(zipFilePath, normalizePath(`${dir}/${fileName}`))
   backupSpinner.succeed(
-    `备份成功 ${chalk.green(
-      `目录: ==> ${normalizePath(`${protocol + normalizePath(other + dir + '/' + fileName)}`)}`
-    )}`
+    `备份成功 ${chalk.green(`目录: ==> ${protocol + normalizePath(other + dir + '/' + fileName)}`)}`
   )
 
   fs.rmSync(`./__temp`, { recursive: true })
