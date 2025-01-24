@@ -4,7 +4,6 @@ import { Client } from 'basic-ftp'
 import chalk from 'chalk'
 import dayjs from 'dayjs'
 import fs from 'node:fs'
-import path from 'node:path'
 import ora from 'ora'
 import { normalizePath, Plugin } from 'vite'
 
@@ -61,7 +60,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           user,
           password,
           secure: true,
-          secureOptions: { rejectUnauthorized: false, timeout: 60000 },
+          secureOptions: { rejectUnauthorized: false, timeout: 120000 },
         })
         uploadSpinner.color = 'blue'
         uploadSpinner.text = '连接成功'
@@ -90,48 +89,35 @@ async function createBackupFile(client: Client, dir: string, protocol: string, o
 
   const fileName = `backup_${dayjs().format('YYYYMMDD_HHmmss')}.zip`
 
-  const localDir = `./__temp/zip`
-  const zipFilePath = `./__temp/${fileName}`
-
-  if (!fs.existsSync(localDir)) {
-    fs.mkdirSync(localDir, { recursive: true })
-  }
-  await client.downloadToDir(localDir, dir)
-  backupSpinner.text = `下载远程文件成功 ${chalk.yellow(
-    `目录: ==> ${protocol + normalizePath(other + dir)}`
-  )}`
-
-  fs.readdirSync(localDir).forEach((i) => {
-    if (i.startsWith('backup_') && i.endsWith('.zip')) {
-      fs.rmSync(path.join(localDir, i))
-    }
-  })
-
-  const output = fs.createWriteStream(zipFilePath)
-  const archive = archiver('zip', {
-    zlib: { level: 9 },
-  })
-
-  output.on('close', function () {
-    // console.log(`压缩文件已创建，总共压缩了 ${archive.pointer()} 字节.`)
-  })
+  const output = fs.createWriteStream(fileName)
+  const archive = archiver('zip', { zlib: { level: 9 } })
+  archive.pipe(output)
 
   archive.on('error', function (err) {
     backupSpinner.fail('压缩失败')
-    throw err
   })
 
-  archive.pipe(output)
-  archive.directory(localDir, false)
-  await archive.finalize()
-  backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(
-    `目录: ==> ${protocol + normalizePath(other + dir + '/' + fileName)}`
-  )}`
+  archive.on('end', function (err) {
+    backupSpinner.succeed(
+      `备份成功 ${chalk.green(
+        `目录: ==> ${protocol + normalizePath(other + dir + '/' + fileName)}`
+      )}`
+    )
+  })
 
-  await client.uploadFrom(zipFilePath, normalizePath(`${dir}/${fileName}`))
-  backupSpinner.succeed(
-    `备份成功 ${chalk.green(`目录: ==> ${protocol + normalizePath(other + dir + '/' + fileName)}`)}`
-  )
-
-  fs.rmSync(`./__temp`, { recursive: true })
+  try {
+    const files = await client.list(dir)
+    for (const file of files) {
+      if (file.name.startsWith('backup_') && file.name.endsWith('.zip')) {
+        await client.remove(file.name)
+      } else {
+        const fileStream = fs.createWriteStream(file.name)
+        await client.downloadTo(fileStream, file.name)
+        archive.append(fs.createReadStream(file.name), { name: file.name })
+      }
+    }
+    await archive.finalize()
+  } catch (error) {
+    backupSpinner.fail('备份失败')
+  }
 }

@@ -4,6 +4,7 @@
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "type": "module",
   "homepage": "https://github.com/yulin96/vite-plugin-deploy-ftp",
   "repository": {
     "type": "git",
