@@ -69,8 +69,16 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         uploadSpinner.succeed(
           `已连接 ${chalk.green(`目录: ==> ${protocol + normalizePath(other + uploadPath)}`)}`
         )
+
         if (fileList.length) {
-          await createBackupFile(client, uploadPath, protocol, other)
+          const isBackFiles = await select({
+            message: '是否备份远程文件',
+            choices: ['否', '是'],
+            default: '否',
+          })
+          if (isBackFiles === '是') {
+            await createBackupFile(client, uploadPath, protocol, other)
+          }
         }
         const uploadFileSpinner = ora('上传中...').start()
         await client.uploadFromDir(outDir, uploadPath)
