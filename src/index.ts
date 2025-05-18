@@ -34,9 +34,10 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       sequential: true,
       order: 'post',
       async handler() {
-        if (!host || !port || !user || !password || !uploadPath || !open) {
-          console.log(chalk.yellow('请配置正确的FTP信息'))
+        if (!open) return
 
+        if (!host || !port || !user || !password || !uploadPath) {
+          console.log(chalk.yellow('请配置正确的FTP信息'))
           return
         }
 
@@ -66,9 +67,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         uploadSpinner.color = 'blue'
         uploadSpinner.text = '连接成功'
         const fileList = await client.list(uploadPath)
-        uploadSpinner.succeed(
-          `已连接 ${chalk.green(`目录: ==> ${protocol + normalizePath(other + uploadPath)}`)}`
-        )
+        uploadSpinner.succeed(`已连接 ${chalk.green(`目录: ==> ${protocol + normalizePath(other + uploadPath)}`)}`)
 
         if (fileList.length) {
           const isBackFiles = await select({
@@ -82,9 +81,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         }
         const uploadFileSpinner = ora('上传中...').start()
         await client.uploadFromDir(outDir, uploadPath)
-        uploadFileSpinner.succeed(
-          '上传成功 url:' + chalk.green(`${protocol + normalizePath(other + uploadPath)}`)
-        )
+        uploadFileSpinner.succeed('上传成功 url:' + chalk.green(`${protocol + normalizePath(other + uploadPath)}`))
         client.close()
       },
     },
@@ -105,9 +102,7 @@ async function createBackupFile(client: Client, dir: string, protocol: string, o
     fs.mkdirSync(localDir, { recursive: true })
   }
   await client.downloadToDir(localDir, dir)
-  backupSpinner.text = `下载远程文件成功 ${chalk.yellow(
-    `目录: ==> ${protocol + normalizePath(other + dir)}`
-  )}`
+  backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`目录: ==> ${protocol + normalizePath(other + dir)}`)}`
 
   fs.readdirSync(localDir).forEach((i) => {
     if (i.startsWith('backup_') && i.endsWith('.zip')) {
