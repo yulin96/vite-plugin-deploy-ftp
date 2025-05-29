@@ -45,5 +45,5 @@
     "dayjs": "^1.11.13",
     "ora": "^8.1.1"
   },
-  "packageManager": "pnpm@9.15.0"
+  "packageManager": "pnpm@10.11.0"
 }
