@@ -47,7 +47,13 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
   // 配置验证
   if (!host || !user || !password || !uploadPath) {
-    throw new Error('Missing required FTP configuration: host, user, password, uploadPath')
+    return {
+      name: 'vite-plugin-deploy-ftp',
+      apply: 'build',
+      enforce: 'post',
+      configResolved() {},
+      closeBundle: { sequential: true, order: 'post', async handler() {} },
+    }
   }
 
   let outDir = 'dist'
