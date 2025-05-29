@@ -4,6 +4,7 @@ import { Client } from 'basic-ftp'
 import chalk from 'chalk'
 import dayjs from 'dayjs'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import ora from 'ora'
 import { normalizePath, Plugin } from 'vite'
@@ -165,7 +166,9 @@ async function connectWithRetry(
 }
 
 function createTempDir(basePath: string): TempDir {
-  const tempPath = path.resolve(basePath)
+  // 使用系统临时目录，避免在项目目录中创建临时文件
+  const tempBaseDir = os.tmpdir()
+  const tempPath = path.join(tempBaseDir, 'vite-plugin-deploy-ftp', basePath)
 
   if (!fs.existsSync(tempPath)) {
     fs.mkdirSync(tempPath, { recursive: true })
@@ -189,13 +192,14 @@ async function createBackupFile(client: Client, dir: string, protocol: string, b
   const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`目录: ==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
 
   const fileName = `backup_${dayjs().format('YYYYMMDD_HHmmss')}.zip`
-  const tempDir = createTempDir('./__temp/zip')
-  const zipFilePath = `./__temp/${fileName}`
+  const tempDir = createTempDir('backup-zip')
+  const zipFilePath = path.join(os.tmpdir(), 'vite-plugin-deploy-ftp', fileName)
 
   try {
-    // 确保临时目录存在
-    if (!fs.existsSync('./__temp')) {
-      fs.mkdirSync('./__temp', { recursive: true })
+    // 确保zip文件的目录存在
+    const zipDir = path.dirname(zipFilePath)
+    if (!fs.existsSync(zipDir)) {
+      fs.mkdirSync(zipDir, { recursive: true })
     }
 
     await client.downloadToDir(tempDir.path, dir)
@@ -264,7 +268,7 @@ async function createSingleBackup(
   const timestamp = dayjs().format('YYYYMMDD_HHmmss')
   const backupSpinner = ora(`备份指定文件中 ${chalk.yellow(`目录: ==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
 
-  const tempDir = createTempDir('./__temp_single')
+  const tempDir = createTempDir('single-backup')
 
   try {
     // 获取远程目录下的文件列表
