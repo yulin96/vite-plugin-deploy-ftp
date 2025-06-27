@@ -135,7 +135,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
         // 如果有无效配置，显示警告
         if (invalidConfigs.length > 0) {
-          console.log(chalk.yellow('\n⚠️ 以下FTP配置缺少必需参数，已从选择列表中排除:'))
+          console.log(chalk.yellow('\n 以下FTP配置缺少必需参数，已从选择列表中排除:'))
           invalidConfigs.forEach((config) => {
             const missing = []
             if (!config.host) missing.push('host')
@@ -229,6 +229,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         uploadFileSpinner.succeed(
           `🎉 上传到 ${displayName} 成功! 访问地址: ` + chalk.green(buildUrl(protocol, baseUrl, uploadPath))
         )
+        console.log()
       } catch (error) {
         if (uploadSpinner) {
           uploadSpinner.fail(`❌ 上传到 ${displayName} 失败`)
@@ -367,14 +368,14 @@ async function createBackupFile(
     // 生成备份后的完整URL
     const backupUrl = buildUrl(protocol, baseUrl, `${dir}/${fileName}`)
 
-    backupSpinner.succeed('✅ 备份完成')
+    backupSpinner.succeed('备份完成')
 
     // 输出备份文件的完整路径
     console.log(chalk.cyan('\n备份文件:'))
-    console.log(chalk.green(`  ${backupUrl}`))
+    console.log(chalk.green(`🔗  ${backupUrl}`))
     console.log() // 添加空行分隔
   } catch (error) {
-    backupSpinner.fail('❌ 备份失败')
+    backupSpinner.fail('备份失败')
     throw error
   } finally {
     tempDir.cleanup()
@@ -435,7 +436,7 @@ async function createSingleBackup(
       .filter((task) => task.exists)
 
     if (backupTasks.length === 0) {
-      backupSpinner.warn('⚠️ 未找到需要备份的文件')
+      backupSpinner.warn('未找到需要备份的文件')
       return
     }
 
@@ -477,7 +478,7 @@ async function createSingleBackup(
 
           return true
         } catch (error) {
-          console.warn(chalk.yellow(`⚠️ 备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
+          console.warn(chalk.yellow(`备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
           return false
         }
       })
@@ -487,22 +488,22 @@ async function createSingleBackup(
     }
 
     if (backedUpCount > 0) {
-      backupProgressSpinner.succeed('✅ 备份完成')
+      backupProgressSpinner.succeed('备份完成')
 
       // 输出备份后的完整路径
       console.log(chalk.cyan('\n备份文件:'))
       backedUpFiles.forEach((url) => {
-        console.log(chalk.green(`  ${url}`))
+        console.log(chalk.green(`🔗  ${url}`))
       })
       console.log() // 添加空行分隔
     } else {
-      backupProgressSpinner.fail('❌ 所有文件备份失败')
+      backupProgressSpinner.fail('所有文件备份失败')
     }
   } catch (error) {
     if (backupProgressSpinner) {
-      backupProgressSpinner.fail('❌ 备份过程中发生错误')
+      backupProgressSpinner.fail('备份过程中发生错误')
     } else {
-      backupSpinner.fail('❌ 备份过程中发生错误')
+      backupSpinner.fail('备份过程中发生错误')
     }
     throw error
   } finally {
