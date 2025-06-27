@@ -1,4 +1,4 @@
-import { select } from '@inquirer/prompts'
+import { checkbox, select } from '@inquirer/prompts'
 import archiver from 'archiver'
 import { Client } from 'basic-ftp'
 import chalk from 'chalk'
@@ -9,44 +9,63 @@ import path from 'node:path'
 import ora from 'ora'
 import { normalizePath, Plugin } from 'vite'
 
-export type vitePluginDeployFtpOption = {
-  host: string
-  port?: number
-  user: string
-  password: string
-  uploadPath: string
-
-  singleBackFiles?: string[]
-  singleBack?: boolean
-
-  alias?: string
-  open?: boolean
-  maxRetries?: number
-  retryDelay?: number
-}
+export type vitePluginDeployFtpOption =
+  | ({
+      uploadPath: string
+      singleBackFiles?: string[]
+      singleBack?: boolean
+      open?: boolean
+      maxRetries?: number
+      retryDelay?: number
+      showBackFile?: boolean
+    } & {
+      ftps: { name: string; host?: string; port?: number; user?: string; password?: string; alias?: string }[]
+      defaultFtp?: string
+    })
+  | ({
+      uploadPath: string
+      singleBackFiles?: string[]
+      singleBack?: boolean
+      open?: boolean
+      maxRetries?: number
+      retryDelay?: number
+      showBackFile?: boolean
+    } & { name?: string; host?: string; port?: number; user?: string; password?: string; alias?: string })
 
 interface TempDir {
   path: string
   cleanup: () => void
 }
 
+interface FtpConfig {
+  name?: string
+  host?: string
+  port?: number
+  user?: string
+  password?: string
+  alias?: string
+}
+
 export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): Plugin {
   const {
     open = true,
-    host,
-    port = 21,
-    user,
-    password,
     uploadPath,
-    alias = '',
     singleBack = false,
     singleBackFiles = ['index.html'],
+    showBackFile = false,
     maxRetries = 3,
     retryDelay = 1000,
   } = option || {}
 
+  // 检查是否为多FTP配置
+  const isMultiFtp = 'ftps' in option
+  const ftpConfigs: FtpConfig[] = isMultiFtp
+    ? option.ftps
+    : [{ ...option, name: option.name || option.alias || option.host }]
+  const defaultFtp = isMultiFtp ? option.defaultFtp : undefined
+
   // 配置验证
-  if (!host || !user || !password || !uploadPath) {
+  if (!uploadPath || (isMultiFtp && (!option.ftps || option.ftps.length === 0))) {
     return {
       name: 'vite-plugin-deploy-ftp',
       apply: 'build',
@@ -57,10 +76,14 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
   }
 
   let outDir = 'dist'
+  let buildFailed = false
   return {
     name: 'vite-plugin-deploy-ftp',
     apply: 'build',
     enforce: 'post',
+    buildEnd(error) {
+      if (error) buildFailed = true
+    },
     configResolved(config) {
       outDir = config.build?.outDir || 'dist'
     },
@@ -68,12 +91,12 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       sequential: true,
       order: 'post',
       async handler() {
-        if (!open) return
+        if (!open || buildFailed) return
 
         try {
           await deployToFtp()
         } catch (error) {
-          console.error(chalk.red('FTP 部署失败:'), error instanceof Error ? error.message : error)
+          console.error(chalk.red('❌ FTP 部署失败:'), error instanceof Error ? error.message : error)
           throw error
         }
       },
@@ -81,8 +104,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
   }
 
   async function deployToFtp() {
-    const { protocol, baseUrl } = parseAlias(alias)
-
     const ftpUploadChoice = await select({
       message: '是否上传FTP',
       choices: ['是', '否'],
@@ -90,45 +111,144 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     })
     if (ftpUploadChoice === '否') return
 
-    const client = new Client()
-    let uploadSpinner: ReturnType<typeof ora> | undefined
+    let selectedConfigs: FtpConfig[] = []
 
-    try {
-      uploadSpinner = ora('准备自动上传，创建连接中...').start()
-
-      await connectWithRetry(client, { host, port, user, password }, maxRetries, retryDelay)
-
-      uploadSpinner.color = 'blue'
-      uploadSpinner.text = '连接成功'
-
-      const fileList = await client.list(uploadPath)
-      uploadSpinner.succeed(`已连接 ${chalk.green(`目录: ==> ${buildUrl(protocol, baseUrl, uploadPath)}`)}`)
-
-      if (fileList.length) {
-        if (singleBack) {
-          await createSingleBackup(client, uploadPath, protocol, baseUrl, singleBackFiles)
-        } else {
-          const isBackFiles = await select({
-            message: '是否备份远程文件',
-            choices: ['否', '是'],
-            default: '否',
-          })
-          if (isBackFiles === '是') {
-            await createBackupFile(client, uploadPath, protocol, baseUrl)
+    if (isMultiFtp) {
+      // 检查是否有默认FTP配置
+      if (defaultFtp) {
+        const defaultConfig = ftpConfigs.find((ftp) => ftp.name === defaultFtp)
+        if (defaultConfig) {
+          if (validateFtpConfig(defaultConfig)) {
+            console.log(chalk.blue(`使用默认FTP配置: ${defaultFtp}`))
+            selectedConfigs = [defaultConfig]
+          } else {
+            console.log(chalk.yellow(`⚠️ 默认FTP配置 "${defaultFtp}" 缺少必需参数，将进行手动选择`))
           }
         }
       }
 
-      const uploadFileSpinner = ora('上传中...').start()
-      await client.uploadFromDir(outDir, uploadPath)
-      uploadFileSpinner.succeed('上传成功 url:' + chalk.green(buildUrl(protocol, baseUrl, uploadPath)))
-    } finally {
-      client.close()
+      // 如果没有找到默认配置或没有设置默认配置，则进行手动选择
+      if (selectedConfigs.length === 0) {
+        // 过滤出有效的配置用于选择
+        const validConfigs = ftpConfigs.filter(validateFtpConfig)
+        const invalidConfigs = ftpConfigs.filter((config) => !validateFtpConfig(config))
+
+        // 如果有无效配置，显示警告
+        if (invalidConfigs.length > 0) {
+          console.log(chalk.yellow('\n⚠️ 以下FTP配置缺少必需参数，已从选择列表中排除:'))
+          invalidConfigs.forEach((config) => {
+            const missing = []
+            if (!config.host) missing.push('host')
+            if (!config.user) missing.push('user')
+            if (!config.password) missing.push('password')
+            console.log(chalk.yellow(`  - ${config.name || '未命名'}: 缺少 ${missing.join(', ')}`))
+          })
+          console.log()
+        }
+
+        if (validConfigs.length === 0) {
+          console.error(chalk.red('❌ 没有可用的有效FTP配置'))
+          return
+        }
+
+        const choices = validConfigs.map((ftp) => ({
+          name: ftp.name,
+          value: ftp,
+        }))
+
+        selectedConfigs = await checkbox({
+          message: '选择要上传的FTP服务器（可多选）',
+          choices,
+          required: true,
+        })
+      }
+    } else {
+      // 单个FTP配置，验证并添加默认的name属性
+      const singleConfig = ftpConfigs[0] as FtpConfig
+      if (validateFtpConfig(singleConfig)) {
+        selectedConfigs = [{ ...singleConfig, name: singleConfig.name || singleConfig.host }]
+      } else {
+        const missing = []
+        if (!singleConfig.host) missing.push('host')
+        if (!singleConfig.user) missing.push('user')
+        if (!singleConfig.password) missing.push('password')
+        console.error(chalk.red(`❌ FTP配置缺少必需参数: ${missing.join(', ')}`))
+        return
+      }
+    }
+
+    // 依次上传到选中的FTP服务器
+    for (const ftpConfig of selectedConfigs) {
+      const { host, port = 21, user, password, alias = '', name } = ftpConfig
+
+      // 验证必需的配置
+      if (!host || !user || !password) {
+        console.error(chalk.red(`❌ FTP配置 "${name || host || '未知'}" 缺少必需参数:`))
+        if (!host) console.error(chalk.red('  - 缺少 host'))
+        if (!user) console.error(chalk.red('  - 缺少 user'))
+        if (!password) console.error(chalk.red('  - 缺少 password'))
+        continue // 跳过这个配置，继续下一个
+      }
+
+      const { protocol, baseUrl } = parseAlias(alias)
+      const displayName = name || host
+
+      console.log(chalk.blue(`\n🚀 开始上传到: ${displayName}`))
+
+      const client = new Client()
+      let uploadSpinner: ReturnType<typeof ora> | undefined
+
+      try {
+        uploadSpinner = ora(`连接到 ${displayName} 中...`).start()
+
+        await connectWithRetry(client, { host, port, user, password }, maxRetries, retryDelay)
+
+        uploadSpinner.color = 'green'
+        uploadSpinner.text = '连接成功'
+
+        const fileList = await client.list(uploadPath)
+        uploadSpinner.succeed(`已连接 ${chalk.green(`${displayName} ==> ${buildUrl(protocol, baseUrl, uploadPath)}`)}`)
+
+        if (fileList.length) {
+          if (singleBack) {
+            await createSingleBackup(client, uploadPath, protocol, baseUrl, singleBackFiles, showBackFile)
+          } else {
+            const isBackFiles = await select({
+              message: `是否备份 ${displayName} 的远程文件`,
+              choices: ['否', '是'],
+              default: '否',
+            })
+            if (isBackFiles === '是') {
+              await createBackupFile(client, uploadPath, protocol, baseUrl, showBackFile)
+            }
+          }
+        }
+
+        const uploadFileSpinner = ora(`上传到 ${displayName} 中...`).start()
+        await client.uploadFromDir(outDir, uploadPath)
+        uploadFileSpinner.succeed(
+          `🎉 上传到 ${displayName} 成功! 访问地址: ` + chalk.green(buildUrl(protocol, baseUrl, uploadPath))
+        )
+      } catch (error) {
+        if (uploadSpinner) {
+          uploadSpinner.fail(`❌ 上传到 ${displayName} 失败`)
+        }
+        console.error(chalk.red(`❌ 上传到 ${displayName} 失败:`), error instanceof Error ? error.message : error)
+        throw error
+      } finally {
+        client.close()
+      }
     }
   }
 }
 
 // 辅助函数
+function validateFtpConfig(
+  config: FtpConfig
+): config is Required<Pick<FtpConfig, 'host' | 'user' | 'password'>> & FtpConfig {
+  return !!(config.host && config.user && config.password)
+}
+
 function parseAlias(alias: string = '') {
   const [protocol = '', baseUrl = ''] = alias.split('://')
   return {
@@ -162,13 +282,13 @@ async function connectWithRetry(
       lastError = error instanceof Error ? error : new Error(String(error))
 
       if (attempt < maxRetries) {
-        console.log(chalk.yellow(`连接失败，${retryDelay}ms 后重试 (${attempt}/${maxRetries})`))
+        console.log(chalk.yellow(`⚠️ 连接失败，${retryDelay}ms 后重试 (${attempt}/${maxRetries})`))
         await new Promise((resolve) => setTimeout(resolve, retryDelay))
       }
     }
   }
 
-  throw new Error(`FTP 连接失败，已重试 ${maxRetries} 次: ${lastError?.message}`)
+  throw new Error(`❌ FTP 连接失败，已重试 ${maxRetries} 次: ${lastError?.message}`)
 }
 
 function createTempDir(basePath: string): TempDir {
@@ -188,14 +308,20 @@ function createTempDir(basePath: string): TempDir {
           fs.rmSync(tempPath, { recursive: true, force: true })
         }
       } catch (error) {
-        console.warn(chalk.yellow(`清理临时目录失败: ${tempPath}`), error)
+        console.warn(chalk.yellow(`⚠️ 清理临时目录失败: ${tempPath}`), error)
       }
     },
   }
 }
 
-async function createBackupFile(client: Client, dir: string, protocol: string, baseUrl: string) {
-  const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`目录: ==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
+async function createBackupFile(
+  client: Client,
+  dir: string,
+  protocol: string,
+  baseUrl: string,
+  showBackFile: boolean = false
+) {
+  const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
 
   const fileName = `backup_${dayjs().format('YYYYMMDD_HHmmss')}.zip`
   const tempDir = createTempDir('backup-zip')
@@ -208,27 +334,47 @@ async function createBackupFile(client: Client, dir: string, protocol: string, b
       fs.mkdirSync(zipDir, { recursive: true })
     }
 
-    await client.downloadToDir(tempDir.path, dir)
-    backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`目录: ==> ${buildUrl(protocol, baseUrl, dir)}`)}`
+    // 获取远程文件列表，过滤掉已有的备份文件
+    const remoteFiles = await client.list(dir)
+    const filteredFiles = remoteFiles.filter((file) => !file.name.startsWith('backup_') || !file.name.endsWith('.zip'))
 
-    // 清理旧的备份文件
-    fs.readdirSync(tempDir.path).forEach((fileName) => {
-      if (fileName.startsWith('backup_') && fileName.endsWith('.zip')) {
-        fs.rmSync(path.join(tempDir.path, fileName))
+    if (showBackFile) {
+      console.log(chalk.cyan(`\n开始备份远程文件，共 ${filteredFiles.length} 个文件:`))
+      filteredFiles.forEach((file) => {
+        console.log(chalk.gray(`  - ${file.name} (${file.size} bytes)`))
+      })
+    }
+
+    // 逐个下载过滤后的文件，跳过备份文件
+    for (const file of filteredFiles) {
+      if (file.type === 1) {
+        // 只下载普通文件，跳过目录
+        await client.downloadTo(path.join(tempDir.path, file.name), normalizePath(`${dir}/${file.name}`))
       }
-    })
+    }
+
+    backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`
 
     // 创建压缩文件
     await createZipFile(tempDir.path, zipFilePath)
 
     backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(
-      `目录: ==> ${buildUrl(protocol, baseUrl, dir + '/' + fileName)}`
+      `==> ${buildUrl(protocol, baseUrl, dir + '/' + fileName)}`
     )}`
 
     await client.uploadFrom(zipFilePath, normalizePath(`${dir}/${fileName}`))
-    backupSpinner.succeed(`备份成功 ${chalk.green(`目录: ==> ${buildUrl(protocol, baseUrl, dir + '/' + fileName)}`)}`)
+
+    // 生成备份后的完整URL
+    const backupUrl = buildUrl(protocol, baseUrl, `${dir}/${fileName}`)
+
+    backupSpinner.succeed('✅ 备份完成')
+
+    // 输出备份文件的完整路径
+    console.log(chalk.cyan('\n备份文件:'))
+    console.log(chalk.green(`  ${backupUrl}`))
+    console.log() // 添加空行分隔
   } catch (error) {
-    backupSpinner.fail('备份失败')
+    backupSpinner.fail('❌ 备份失败')
     throw error
   } finally {
     tempDir.cleanup()
@@ -238,7 +384,7 @@ async function createBackupFile(client: Client, dir: string, protocol: string, b
         fs.rmSync(zipFilePath)
       }
     } catch (error) {
-      console.warn(chalk.yellow('清理zip文件失败'), error)
+      console.warn(chalk.yellow('⚠️ 清理zip文件失败'), error)
     }
   }
 }
@@ -269,12 +415,14 @@ async function createSingleBackup(
   dir: string,
   protocol: string,
   baseUrl: string,
-  singleBackFiles: string[]
+  singleBackFiles: string[],
+  showBackFile: boolean = false
 ) {
   const timestamp = dayjs().format('YYYYMMDD_HHmmss')
-  const backupSpinner = ora(`备份指定文件中 ${chalk.yellow(`目录: ==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
+  const backupSpinner = ora(`备份指定文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
 
   const tempDir = createTempDir('single-backup')
+  let backupProgressSpinner: ReturnType<typeof ora> | undefined
 
   try {
     // 获取远程目录下的文件列表
@@ -287,13 +435,26 @@ async function createSingleBackup(
       .filter((task) => task.exists)
 
     if (backupTasks.length === 0) {
-      backupSpinner.warn('未找到需要备份的文件')
+      backupSpinner.warn('⚠️ 未找到需要备份的文件')
       return
     }
+
+    backupSpinner.stop()
+
+    if (showBackFile) {
+      console.log(chalk.cyan(`\n开始单文件备份，共 ${backupTasks.length} 个文件:`))
+      backupTasks.forEach((task) => {
+        console.log(chalk.gray(`  - ${task.fileName}`))
+      })
+    }
+
+    // 创建新的备份进度spinner
+    backupProgressSpinner = ora('正在备份文件...').start()
 
     // 并发备份文件（限制并发数避免过载）
     const concurrencyLimit = 3
     let backedUpCount = 0
+    const backedUpFiles: string[] = []
 
     for (let i = 0; i < backupTasks.length; i += concurrencyLimit) {
       const batch = backupTasks.slice(i, i + concurrencyLimit)
@@ -302,15 +463,21 @@ async function createSingleBackup(
           const localTempPath = path.join(tempDir.path, fileName)
           const [name, ext] = fileName.split('.')
           const suffix = ext ? `.${ext}` : ''
-          const backupRemotePath = normalizePath(`${dir}/${name}.${timestamp}${suffix}`)
+          const backupFileName = `${name}.${timestamp}${suffix}`
+          const backupRemotePath = normalizePath(`${dir}/${backupFileName}`)
 
           // 下载远程文件到本地临时目录
           await client.downloadTo(localTempPath, normalizePath(`${dir}/${fileName}`))
           // 上传为带时间戳的新文件名
           await client.uploadFrom(localTempPath, backupRemotePath)
+
+          // 生成备份后的完整URL
+          const backupUrl = buildUrl(protocol, baseUrl, backupRemotePath)
+          backedUpFiles.push(backupUrl)
+
           return true
         } catch (error) {
-          console.warn(chalk.yellow(`备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
+          console.warn(chalk.yellow(`⚠️ 备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
           return false
         }
       })
@@ -320,12 +487,23 @@ async function createSingleBackup(
     }
 
     if (backedUpCount > 0) {
-      backupSpinner.succeed(`已备份 ${backedUpCount} 个文件到 ${chalk.green(buildUrl(protocol, baseUrl, dir))}`)
+      backupProgressSpinner.succeed('✅ 备份完成')
+
+      // 输出备份后的完整路径
+      console.log(chalk.cyan('\n备份文件:'))
+      backedUpFiles.forEach((url) => {
+        console.log(chalk.green(`  ${url}`))
+      })
+      console.log() // 添加空行分隔
     } else {
-      backupSpinner.fail('所有文件备份失败')
+      backupProgressSpinner.fail('❌ 所有文件备份失败')
     }
   } catch (error) {
-    backupSpinner.fail('备份过程中发生错误')
+    if (backupProgressSpinner) {
+      backupProgressSpinner.fail('❌ 备份过程中发生错误')
+    } else {
+      backupSpinner.fail('❌ 备份过程中发生错误')
+    }
     throw error
   } finally {
     tempDir.cleanup()
