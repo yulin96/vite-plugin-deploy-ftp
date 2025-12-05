@@ -18,6 +18,7 @@ export type vitePluginDeployFtpOption =
       maxRetries?: number
       retryDelay?: number
       showBackFile?: boolean
+      autoUpload?: boolean
     } & {
       ftps: { name: string; host?: string; port?: number; user?: string; password?: string; alias?: string }[]
       defaultFtp?: string
@@ -30,6 +31,7 @@ export type vitePluginDeployFtpOption =
       maxRetries?: number
       retryDelay?: number
       showBackFile?: boolean
+      autoUpload?: boolean
     } & { name?: string; host?: string; port?: number; user?: string; password?: string; alias?: string })
 
 interface TempDir {
@@ -55,13 +57,13 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     showBackFile = false,
     maxRetries = 3,
     retryDelay = 1000,
+    autoUpload = false,
   } = option || {}
 
   // 检查是否为多FTP配置
   const isMultiFtp = 'ftps' in option
-  const ftpConfigs: FtpConfig[] = isMultiFtp
-    ? option.ftps
-    : [{ ...option, name: option.name || option.alias || option.host }]
+  const ftpConfigs: FtpConfig[] =
+    isMultiFtp ? option.ftps : [{ ...option, name: option.name || option.alias || option.host }]
   const defaultFtp = isMultiFtp ? option.defaultFtp : undefined
 
   // 配置验证
@@ -104,12 +106,14 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
   }
 
   async function deployToFtp() {
-    const ftpUploadChoice = await select({
-      message: '是否上传FTP',
-      choices: ['是', '否'],
-      default: '是',
-    })
-    if (ftpUploadChoice === '否') return
+    if (!autoUpload) {
+      const ftpUploadChoice = await select({
+        message: '是否上传FTP',
+        choices: ['是', '否'],
+        default: '是',
+      })
+      if (ftpUploadChoice === '否') return
+    }
 
     let selectedConfigs: FtpConfig[] = []
 
@@ -227,7 +231,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         const uploadFileSpinner = ora(`上传到 ${displayName} 中...`).start()
         await client.uploadFromDir(outDir, uploadPath)
         uploadFileSpinner.succeed(
-          `🎉 上传到 ${displayName} 成功! 访问地址: ` + chalk.green(buildUrl(protocol, baseUrl, uploadPath))
+          `🎉 上传到 ${displayName} 成功! 访问地址: ` + chalk.green(buildUrl(protocol, baseUrl, uploadPath)),
         )
         console.log()
       } catch (error) {
@@ -245,7 +249,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
 // 辅助函数
 function validateFtpConfig(
-  config: FtpConfig
+  config: FtpConfig,
 ): config is Required<Pick<FtpConfig, 'host' | 'user' | 'password'>> & FtpConfig {
   return !!(config.host && config.user && config.password)
 }
@@ -266,7 +270,7 @@ async function connectWithRetry(
   client: Client,
   config: { host: string; port: number; user: string; password: string },
   maxRetries: number,
-  retryDelay: number
+  retryDelay: number,
 ) {
   let lastError: Error | undefined
 
@@ -320,7 +324,7 @@ async function createBackupFile(
   dir: string,
   protocol: string,
   baseUrl: string,
-  showBackFile: boolean = false
+  showBackFile: boolean = false,
 ) {
   const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
 
@@ -360,7 +364,7 @@ async function createBackupFile(
     await createZipFile(tempDir.path, zipFilePath)
 
     backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(
-      `==> ${buildUrl(protocol, baseUrl, dir + '/' + fileName)}`
+      `==> ${buildUrl(protocol, baseUrl, dir + '/' + fileName)}`,
     )}`
 
     await client.uploadFrom(zipFilePath, normalizePath(`${dir}/${fileName}`))
@@ -417,7 +421,7 @@ async function createSingleBackup(
   protocol: string,
   baseUrl: string,
   singleBackFiles: string[],
-  showBackFile: boolean = false
+  showBackFile: boolean = false,
 ) {
   const timestamp = dayjs().format('YYYYMMDD_HHmmss')
   const backupSpinner = ora(`备份指定文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()

@@ -20,7 +20,8 @@
   },
   "scripts": {
     "build": "tsup",
-    "pack": "pnpm run build && pnpm pack"
+    "pack": "pnpm run build && pnpm pack",
+    "build:test": "vite build"
   },
   "keywords": [
     "vite-plugin"
@@ -44,6 +45,5 @@
     "chalk": "^5.4.1",
     "dayjs": "^1.11.13",
     "ora": "^8.2.0"
-  },
-  "packageManager": "pnpm@10.11.0"
+  }
 }
