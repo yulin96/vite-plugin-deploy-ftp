@@ -45,6 +45,5 @@
     "chalk": "^5.4.1",
     "dayjs": "^1.11.13",
     "ora": "^8.2.0"
-  },
-  "packageManager": "pnpm@10.24.0"
+  }
 }
