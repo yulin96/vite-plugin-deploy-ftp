@@ -96,6 +96,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         if (!open || buildFailed) return
 
         try {
+          process.stdout.write('\x1b[2J\x1b[0f')
           await deployToFtp()
         } catch (error) {
           console.error(chalk.red('❌ FTP 部署失败:'), error instanceof Error ? error.message : error)
@@ -197,10 +198,22 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       const { protocol, baseUrl } = parseAlias(alias)
       const displayName = name || host
 
-      console.log(chalk.blue(`\n🚀 开始上传到: ${displayName}`))
+      // 获取所有需要上传的文件
+      const allFiles = getAllFiles(outDir)
+      const totalFiles = allFiles.length
+
+      console.log(chalk.bold(`\n🚀 FTP 部署开始`))
+      console.log()
+      console.log(`Host:     ${chalk.blue(host)}`)
+      console.log(`User:     ${chalk.blue(user)}`)
+      console.log(`Source:   ${chalk.blue(outDir)}`)
+      console.log(`Target:   ${chalk.blue(uploadPath)}`)
+      console.log(`Files:    ${chalk.blue(totalFiles)}`)
+      console.log()
 
       const client = new Client()
       let uploadSpinner: ReturnType<typeof ora> | undefined
+      const startTime = Date.now()
 
       try {
         uploadSpinner = ora(`连接到 ${displayName} 中...`).start()
@@ -209,9 +222,13 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
         uploadSpinner.color = 'green'
         uploadSpinner.text = '连接成功'
+        // 稍微延迟一下让用户看到连接成功
+        await new Promise((resolve) => setTimeout(resolve, 500))
 
         const fileList = await client.list(uploadPath)
-        uploadSpinner.succeed(`已连接 ${chalk.green(`${displayName} ==> ${buildUrl(protocol, baseUrl, uploadPath)}`)}`)
+        uploadSpinner.succeed('连接成功!')
+
+        const startDir = await client.pwd()
 
         if (fileList.length) {
           if (singleBack) {
@@ -228,12 +245,52 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           }
         }
 
-        const uploadFileSpinner = ora(`上传到 ${displayName} 中...`).start()
-        await client.uploadFromDir(outDir, uploadPath)
-        uploadFileSpinner.succeed(
-          `🎉 上传到 ${displayName} 成功! 访问地址: ` + chalk.green(buildUrl(protocol, baseUrl, uploadPath)),
-        )
+        // 开始上传
+        const progressSpinner = ora('准备上传...').start()
+
+        let uploadedCount = 0
+
+        // 分组文件以减少目录切换
+        const groups: Record<string, string[]> = {}
+        for (const file of allFiles) {
+          const dir = path.dirname(file)
+          if (!groups[dir]) groups[dir] = []
+          groups[dir].push(path.basename(file))
+        }
+
+        for (const relDir of Object.keys(groups)) {
+          await client.cd(startDir) // 确保每次从初始目录开始
+          const remoteDir = normalizePath(path.join(uploadPath, relDir))
+          await client.ensureDir(remoteDir)
+
+          for (const fileName of groups[relDir]) {
+            const currentFile = path.join(relDir, fileName)
+            const displayPath = normalizePath(currentFile)
+            progressSpinner.text = `正在上传: ${chalk.dim(displayPath)}\n${formatProgressBar(uploadedCount, totalFiles)}`
+
+            const localFile = path.join(outDir, relDir, fileName)
+            await client.uploadFrom(localFile, fileName)
+            uploadedCount++
+          }
+        }
+
+        progressSpinner.succeed('所有文件上传完成!')
+        console.log(chalk.green(formatProgressBar(totalFiles, totalFiles)))
+        process.stdout.write('\x1b[2J\x1b[0f')
+        console.log(chalk.gray('\n────────────────────────────────────────\n'))
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+        console.log(`🎉 部署成功!`)
         console.log()
+        console.log(`统计:`)
+        console.log(` ✔ 成功: ${chalk.green(totalFiles)}`)
+        console.log(` ⏱ 耗时: ${chalk.green(duration + 's')}`)
+        console.log()
+
+        if (baseUrl) {
+          console.log(`访问地址: ${chalk.green(buildUrl(protocol, baseUrl, uploadPath))}`)
+          console.log()
+        }
       } catch (error) {
         if (uploadSpinner) {
           uploadSpinner.fail(`❌ 上传到 ${displayName} 失败`)
@@ -245,6 +302,30 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       }
     }
   }
+}
+
+function getAllFiles(dirPath: string, arrayOfFiles: string[] = [], relativePath = '') {
+  const files = fs.readdirSync(dirPath)
+
+  files.forEach(function (file) {
+    const fullPath = path.join(dirPath, file)
+    const relPath = path.join(relativePath, file)
+    if (fs.statSync(fullPath).isDirectory()) {
+      getAllFiles(fullPath, arrayOfFiles, relPath)
+    } else {
+      arrayOfFiles.push(relPath)
+    }
+  })
+
+  return arrayOfFiles
+}
+
+function formatProgressBar(current: number, total: number, width = 30) {
+  const percentage = Math.round((current / total) * 100)
+  const filled = Math.round((width * current) / total)
+  const empty = width - filled
+  const bar = '█'.repeat(filled) + '░'.repeat(empty)
+  return `${bar} ${percentage}% (${current}/${total})`
 }
 
 // 辅助函数
@@ -376,7 +457,7 @@ async function createBackupFile(
 
     // 输出备份文件的完整路径
     console.log(chalk.cyan('\n备份文件:'))
-    console.log(chalk.green(`🔗  ${backupUrl}`))
+    console.log(chalk.green(`${backupUrl}`))
     console.log() // 添加空行分隔
   } catch (error) {
     backupSpinner.fail('备份失败')
