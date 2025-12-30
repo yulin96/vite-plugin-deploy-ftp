@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite'
-import vitePluginDeployFtp from './src'
+import vitePluginDeployFtp from '../src'
 
 export default defineConfig({
   plugins: [
@@ -37,7 +37,13 @@ export default defineConfig({
       ],
     }),
   ],
+
   build: {
-    outDir: 'dist_test',
+    outDir: '__dist__',
+    rollupOptions: {
+      input: {
+        main: './index.html',
+      },
+    },
   },
 })
