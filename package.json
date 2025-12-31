@@ -24,7 +24,13 @@
     "build:test": "cd playground && vite build"
   },
   "keywords": [
-    "vite-plugin"
+    "vite-plugin",
+    "vite",
+    "plugin",
+    "deploy",
+    "ftp",
+    "upload",
+    "publish"
   ],
   "author": "yulinzhao",
   "license": "MIT",
