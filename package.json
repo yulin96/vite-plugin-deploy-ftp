@@ -4,24 +4,33 @@
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "type": "commonjs",
   "homepage": "https://github.com/yulin96/vite-plugin-deploy-ftp",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yulin96/vite-plugin-deploy-ftp"
+    "url": "git+https://github.com/yulin96/vite-plugin-deploy-ftp.git"
   },
   "bugs": {
     "url": "https://github.com/yulin96/vite-plugin-deploy-ftp/issues"
   },
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
     }
   },
   "scripts": {
     "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json",
     "pack": "pnpm run build && pnpm pack",
-    "build:test": "cd playground && vite build"
+    "build:test": "cd playground && vite build",
+    "build:test:deploy": "cd playground && vite build --mode deploy"
   },
   "keywords": [
     "vite-plugin",

@@ -4,39 +4,36 @@ import { Client } from 'basic-ftp'
 import chalk from 'chalk'
 import dayjs from 'dayjs'
 import fs from 'node:fs'
+import { stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import ora from 'ora'
-import { normalizePath, Plugin } from 'vite'
+import { normalizePath, Plugin, type ResolvedConfig } from 'vite'
 
 export type vitePluginDeployFtpOption =
-  | ({
-      uploadPath: string
-      singleBackFiles?: string[]
-      singleBack?: boolean
-      open?: boolean
-      maxRetries?: number
-      retryDelay?: number
-      showBackFile?: boolean
-      autoUpload?: boolean
-    } & {
-      ftps: { name: string; host?: string; port?: number; user?: string; password?: string; alias?: string }[]
+  | (BaseOption & {
+      ftps: FtpConfig[]
       defaultFtp?: string
     })
-  | ({
-      uploadPath: string
-      singleBackFiles?: string[]
-      singleBack?: boolean
-      open?: boolean
-      maxRetries?: number
-      retryDelay?: number
-      showBackFile?: boolean
-      autoUpload?: boolean
-    } & { name?: string; host?: string; port?: number; user?: string; password?: string; alias?: string })
+  | (BaseOption & FtpConfig)
 
 interface TempDir {
   path: string
   cleanup: () => void
+}
+
+interface BaseOption {
+  uploadPath: string
+  singleBackFiles?: string[]
+  singleBack?: boolean
+  open?: boolean
+  maxRetries?: number
+  retryDelay?: number
+  showBackFile?: boolean
+  autoUpload?: boolean
+  fancy?: boolean
+  failOnError?: boolean
+  concurrency?: number
 }
 
 interface FtpConfig {
@@ -48,99 +45,555 @@ interface FtpConfig {
   alias?: string
 }
 
+interface UploadResult {
+  success: boolean
+  file: string
+  name: string
+  size: number
+  retries: number
+  error?: Error
+}
+
+interface UploadTask {
+  filePath: string
+  remotePath: string
+  size: number
+}
+
+interface FtpConnectConfig {
+  host: string
+  port: number
+  user: string
+  password: string
+}
+
+interface DeployTargetResult {
+  name: string
+  totalFiles: number
+  failedCount: number
+  error?: Error
+}
+
+const formatBytes = (bytes: number): string => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = 0
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex++
+  }
+
+  const digits = value >= 100 || unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(digits)} ${units[unitIndex]}`
+}
+
+const formatDuration = (seconds: number): string => {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--'
+
+  const rounded = Math.round(seconds)
+  const mins = Math.floor(rounded / 60)
+  const secs = rounded % 60
+
+  if (mins === 0) return `${secs}s`
+  return `${mins}m${String(secs).padStart(2, '0')}s`
+}
+
+const trimMiddle = (text: string, maxLength: number): string => {
+  if (text.length <= maxLength) return text
+  if (maxLength <= 10) return text.slice(0, maxLength)
+
+  const leftLength = Math.floor((maxLength - 3) / 2)
+  const rightLength = maxLength - 3 - leftLength
+  return `${text.slice(0, leftLength)}...${text.slice(-rightLength)}`
+}
+
+const buildCapsuleBar = (ratio: number, width = 30): string => {
+  const safeRatio = Math.max(0, Math.min(1, ratio))
+  if (width <= 0) return ''
+
+  if (safeRatio >= 1) {
+    return chalk.green('█'.repeat(width))
+  }
+
+  const pointerIndex = Math.min(width - 1, Math.floor(width * safeRatio))
+  const done = pointerIndex > 0 ? chalk.green('█'.repeat(pointerIndex)) : ''
+  const pointer = chalk.cyanBright('▸')
+  const pending = pointerIndex < width - 1 ? chalk.gray('░'.repeat(width - pointerIndex - 1)) : ''
+
+  return `${done}${pointer}${pending}`
+}
+
+const normalizeRemotePath = (targetDir: string, relativeFilePath: string): string => {
+  const joined = normalizePath(`${targetDir}/${relativeFilePath}`).replace(/\/{2,}/g, '/')
+  if (targetDir.startsWith('/')) return joined.startsWith('/') ? joined : `/${joined}`
+  return joined.replace(/^\/+/, '')
+}
+
+const sleep = async (ms: number) => {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): Plugin {
+  const safeOption = (option || {}) as vitePluginDeployFtpOption
   const {
     open = true,
-    uploadPath,
+    uploadPath = '',
     singleBack = false,
     singleBackFiles = ['index.html'],
     showBackFile = false,
     maxRetries = 3,
     retryDelay = 1000,
     autoUpload = false,
-  } = option || {}
+    fancy = true,
+    failOnError = true,
+    concurrency = 1,
+  } = safeOption
 
-  // 检查是否为多FTP配置
-  const isMultiFtp = 'ftps' in option
-  const ftpConfigs: FtpConfig[] =
-    isMultiFtp ? option.ftps : [{ ...option, name: option.name || option.alias || option.host }]
-  const defaultFtp = isMultiFtp ? option.defaultFtp : undefined
+  const isMultiFtp = 'ftps' in safeOption
+  const ftpConfigs: FtpConfig[] = isMultiFtp
+    ? safeOption.ftps || []
+    : [{ ...safeOption, name: safeOption.name || safeOption.alias || safeOption.host }]
+  const defaultFtp = isMultiFtp ? safeOption.defaultFtp : undefined
 
-  // 配置验证
-  if (!uploadPath || (isMultiFtp && (!option.ftps || option.ftps.length === 0))) {
+  let outDir = normalizePath(path.resolve('dist'))
+  let upload = false
+  let buildFailed = false
+  let resolvedConfig: ResolvedConfig | null = null
+
+  const useInteractiveOutput =
+    fancy && Boolean(process.stdout?.isTTY) && Boolean(process.stderr?.isTTY) && !process.env.CI
+
+  const clearScreen = () => {
+    if (!useInteractiveOutput) return
+    process.stdout.write('\x1b[2J\x1b[0f')
+  }
+
+  const validateOptions = (): string[] => {
+    const errors: string[] = []
+
+    if (!uploadPath) errors.push('uploadPath is required')
+    if (!Number.isInteger(maxRetries) || maxRetries < 1) errors.push('maxRetries must be >= 1')
+    if (!Number.isFinite(retryDelay) || retryDelay < 0) errors.push('retryDelay must be >= 0')
+    if (!Number.isInteger(concurrency) || concurrency < 1) errors.push('concurrency must be >= 1')
+
+    if (isMultiFtp) {
+      if (!ftpConfigs.length) {
+        errors.push('ftps is required and must not be empty')
+      }
+
+      if (defaultFtp && !ftpConfigs.some((ftp) => ftp.name === defaultFtp)) {
+        errors.push(`defaultFtp "${defaultFtp}" does not match any ftp.name`)
+      }
+
+      const validConfigCount = ftpConfigs.filter(validateFtpConfig).length
+      if (validConfigCount === 0) {
+        errors.push('at least one ftp config requires host, user and password')
+      }
+    } else {
+      const singleConfig = ftpConfigs[0]
+      if (!singleConfig?.host) errors.push('host is required')
+      if (!singleConfig?.user) errors.push('user is required')
+      if (!singleConfig?.password) errors.push('password is required')
+    }
+
+    return errors
+  }
+
+  const uploadFileWithRetry = async (
+    task: UploadTask,
+    context: {
+      client: Client
+      ensuredDirs: Set<string>
+      ensureConnected: () => Promise<void>
+      markDisconnected: () => void
+      silentLogs: boolean
+      maxRetries: number
+      retryDelay: number
+    },
+  ): Promise<UploadResult> => {
+    for (let attempt = 1; attempt <= context.maxRetries; attempt++) {
+      try {
+        await context.ensureConnected()
+
+        const remoteDir = normalizePath(path.posix.dirname(task.remotePath))
+        if (remoteDir && remoteDir !== '.' && !context.ensuredDirs.has(remoteDir)) {
+          await context.client.ensureDir(remoteDir)
+          context.ensuredDirs.add(remoteDir)
+        }
+
+        await context.client.uploadFrom(task.filePath, path.posix.basename(task.remotePath))
+        return {
+          success: true,
+          file: task.filePath,
+          name: task.remotePath,
+          size: task.size,
+          retries: attempt - 1,
+        }
+      } catch (error) {
+        context.markDisconnected()
+        try {
+          context.client.close()
+        } catch {
+          // ignore close errors
+        }
+
+        if (attempt === context.maxRetries) {
+          if (!context.silentLogs) {
+            console.log(
+              `${chalk.red('✗')} ${task.filePath} => ${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+
+          return {
+            success: false,
+            file: task.filePath,
+            name: task.remotePath,
+            size: task.size,
+            retries: attempt - 1,
+            error: error as Error,
+          }
+        }
+
+        if (!context.silentLogs) {
+          console.log(
+            `${chalk.yellow('⚠')} ${task.filePath} 上传失败，正在重试 (${attempt}/${context.maxRetries})...`,
+          )
+        }
+        await sleep(context.retryDelay * attempt)
+      }
+    }
+
     return {
-      name: 'vite-plugin-deploy-ftp',
-      apply: 'build',
-      enforce: 'post',
-      configResolved() {},
-      closeBundle: { sequential: true, order: 'post', async handler() {} },
+      success: false,
+      file: task.filePath,
+      name: task.remotePath,
+      size: task.size,
+      retries: context.maxRetries,
+      error: new Error('Max retries exceeded'),
     }
   }
 
-  let outDir = 'dist'
-  let buildFailed = false
-  return {
-    name: 'vite-plugin-deploy-ftp',
-    apply: 'build',
-    enforce: 'post',
-    buildEnd(error) {
-      if (error) buildFailed = true
-    },
-    configResolved(config) {
-      outDir = config.build?.outDir || 'dist'
-    },
-    closeBundle: {
-      sequential: true,
-      order: 'post',
-      async handler() {
-        if (!open || buildFailed) return
+  const uploadFilesInBatches = async (
+    connectConfig: FtpConnectConfig,
+    files: string[],
+    targetDir: string,
+    windowSize: number = concurrency,
+  ): Promise<UploadResult[]> => {
+    const results: UploadResult[] = []
+    const totalFiles = files.length
+    const tasks: UploadTask[] = []
+
+    let completed = 0
+    let failed = 0
+    let uploadedBytes = 0
+    let retries = 0
+
+    const taskCandidates = await Promise.all(
+      files.map(async (relativeFilePath) => {
+        const filePath = normalizePath(path.resolve(outDir, relativeFilePath))
+        const remotePath = normalizeRemotePath(targetDir, relativeFilePath)
 
         try {
-          process.stdout.write('\x1b[2J\x1b[0f')
-          await deployToFtp()
+          const fileStats = await stat(filePath)
+          return { task: { filePath, remotePath, size: fileStats.size } as UploadTask }
         } catch (error) {
-          console.error(chalk.red('❌ FTP 部署失败:'), error instanceof Error ? error.message : error)
-          throw error
+          return { task: null, error: error as Error, filePath, remotePath }
         }
-      },
-    },
+      }),
+    )
+
+    for (const candidate of taskCandidates) {
+      if (candidate.task) {
+        tasks.push(candidate.task)
+      } else {
+        failed++
+        completed++
+        results.push({
+          success: false,
+          file: candidate.filePath,
+          name: candidate.remotePath,
+          size: 0,
+          retries: 0,
+          error: candidate.error,
+        })
+      }
+    }
+
+    const totalBytes = tasks.reduce((sum, task) => sum + task.size, 0)
+    const startAt = Date.now()
+    const safeWindowSize = Math.max(1, Math.min(windowSize, tasks.length || 1))
+    const activeFiles = new Set<string>()
+    const silentLogs = Boolean(useInteractiveOutput)
+
+    const spinner = useInteractiveOutput ? ora({ text: '准备上传...', spinner: 'dots12' }).start() : null
+    const reportEvery = Math.max(1, Math.ceil(totalFiles / 10))
+    let lastReportedCompleted = -1
+
+    const updateProgress = () => {
+      const progressRatio = totalFiles > 0 ? completed / totalFiles : 1
+      const percentage = Math.round(progressRatio * 100)
+      const elapsedSeconds = (Date.now() - startAt) / 1000
+      const speed = elapsedSeconds > 0 ? uploadedBytes / elapsedSeconds : 0
+      const etaSeconds = speed > 0 ? Math.max(0, (totalBytes - uploadedBytes) / speed) : 0
+      const activeList = Array.from(activeFiles)
+      const currentFile = activeList.length > 0 ? trimMiddle(activeList[activeList.length - 1], 86) : '-'
+
+      if (!spinner) {
+        if (completed === lastReportedCompleted) return
+        if (completed === totalFiles || completed % reportEvery === 0) {
+          console.log(
+            `${chalk.gray('进度:')} ${completed}/${totalFiles} (${percentage}%) | ${chalk.gray('数据:')} ${formatBytes(uploadedBytes)}/${formatBytes(totalBytes)} | ${chalk.gray('速度:')} ${formatBytes(speed)}/s`,
+          )
+          lastReportedCompleted = completed
+        }
+        return
+      }
+
+      const bar = buildCapsuleBar(progressRatio)
+      const warnLine =
+        retries > 0 || failed > 0
+          ? `\n${chalk.yellow('重试')}: ${retries}  ${chalk.yellow('失败')}: ${failed}`
+          : ''
+
+      spinner.text = [
+        `${chalk.cyan('正在上传:')} ${chalk.white(currentFile)}`,
+        `${bar} ${chalk.bold(`${percentage}%`)} ${chalk.gray(`(${completed}/${totalFiles})`)} ${chalk.gray('|')} ${chalk.blue(formatBytes(uploadedBytes))}/${chalk.blue(formatBytes(totalBytes))} ${chalk.gray('|')} ${chalk.magenta(`${formatBytes(speed)}/s`)} ${chalk.gray('|')} 预计 ${chalk.yellow(formatDuration(etaSeconds))}`,
+      ].join('\n')
+      spinner.text += warnLine
+    }
+
+    const refreshTimer = spinner ? setInterval(updateProgress, 120) : null
+    let currentIndex = 0
+
+    const worker = async () => {
+      const client = new Client()
+      const ensuredDirs = new Set<string>()
+      let connected = false
+
+      const ensureConnected = async () => {
+        if (connected) return
+        await connectWithRetry(client, connectConfig, maxRetries, retryDelay, true)
+        connected = true
+      }
+
+      const markDisconnected = () => {
+        connected = false
+        ensuredDirs.clear()
+      }
+
+      try {
+        while (true) {
+          const index = currentIndex++
+          if (index >= tasks.length) return
+
+          const task = tasks[index]
+          activeFiles.add(task.remotePath)
+          updateProgress()
+
+          const result = await uploadFileWithRetry(task, {
+            client,
+            ensuredDirs,
+            ensureConnected,
+            markDisconnected,
+            silentLogs,
+            maxRetries,
+            retryDelay,
+          })
+
+          completed++
+          retries += result.retries
+          if (result.success) {
+            uploadedBytes += result.size
+          } else {
+            failed++
+          }
+          results.push(result)
+          activeFiles.delete(task.remotePath)
+          updateProgress()
+        }
+      } finally {
+        client.close()
+      }
+    }
+
+    updateProgress()
+
+    try {
+      await Promise.all(Array.from({ length: safeWindowSize }, () => worker()))
+    } finally {
+      if (refreshTimer) clearInterval(refreshTimer)
+    }
+
+    if (spinner) {
+      const elapsedSeconds = (Date.now() - startAt) / 1000
+      const successCount = results.filter((item) => item.success).length
+      const speed = elapsedSeconds > 0 ? uploadedBytes / elapsedSeconds : 0
+      spinner.succeed(
+        `${chalk.green('上传成功')} ${successCount} 个文件。\n${buildCapsuleBar(1)} 100% (${totalFiles}/${totalFiles}) ${chalk.gray('|')} 速度 ${chalk.magenta(`${formatBytes(speed)}/s`)} ${chalk.gray('|')} 耗时 ${chalk.yellow(formatDuration(elapsedSeconds))}`,
+      )
+    } else {
+      console.log(`${chalk.green('✔')} 所有文件上传完成 (${totalFiles}/${totalFiles})`)
+    }
+
+    return results
   }
 
-  async function deployToFtp() {
+  const deploySingleTarget = async (ftpConfig: FtpConfig): Promise<DeployTargetResult> => {
+    const { host, port = 21, user, password, alias = '', name } = ftpConfig
+
+    if (!host || !user || !password) {
+      console.error(chalk.red(`❌ FTP配置 "${name || host || '未知'}" 缺少必需参数:`))
+      if (!host) console.error(chalk.red('  - 缺少 host'))
+      if (!user) console.error(chalk.red('  - 缺少 user'))
+      if (!password) console.error(chalk.red('  - 缺少 password'))
+      return { name: name || host || 'unknown', totalFiles: 0, failedCount: 1 }
+    }
+
+    const allFiles = getAllFiles(outDir)
+    const totalFiles = allFiles.length
+    const { protocol, baseUrl } = parseAlias(alias)
+    const displayName = name || host
+    const startTime = Date.now()
+
+    if (allFiles.length === 0) {
+      console.log(`${chalk.yellow('⚠ 没有找到需要上传的文件')}`)
+      return { name: displayName, totalFiles: 0, failedCount: 0 }
+    }
+
+    clearScreen()
+    console.log(chalk.cyan(`\n🚀 FTP 部署开始\n`))
+    console.log(`${chalk.gray('Server:')}   ${chalk.green(displayName)}`)
+    console.log(`${chalk.gray('Host:')}     ${chalk.green(host)}`)
+    console.log(`${chalk.gray('Source:')}   ${chalk.yellow(outDir)}`)
+    console.log(`${chalk.gray('Target:')}   ${chalk.yellow(uploadPath)}`)
+    if (alias) console.log(`${chalk.gray('Alias:')}    ${chalk.green(alias)}`)
+    console.log(`${chalk.gray('Files:')}    ${chalk.blue(totalFiles)}\n`)
+
+    const connectConfig: FtpConnectConfig = { host, port, user, password }
+    const preflightClient = new Client()
+    const preflightSpinner = useInteractiveOutput ? ora(`连接到 ${displayName}...`).start() : null
+
+    try {
+      await connectWithRetry(preflightClient, connectConfig, maxRetries, retryDelay, Boolean(preflightSpinner))
+      if (preflightSpinner) preflightSpinner.succeed('连接成功')
+
+      await preflightClient.ensureDir(uploadPath)
+      const fileList = await preflightClient.list(uploadPath)
+
+      if (fileList.length) {
+        if (singleBack) {
+          await createSingleBackup(preflightClient, uploadPath, protocol, baseUrl, singleBackFiles, showBackFile)
+        } else {
+          const shouldBackup = await select({
+            message: `是否备份 ${displayName} 的远程文件`,
+            choices: ['否', '是'],
+            default: '否',
+          })
+
+          if (shouldBackup === '是') {
+            await createBackupFile(preflightClient, uploadPath, protocol, baseUrl, showBackFile)
+          }
+        }
+      }
+
+      const results = await uploadFilesInBatches(connectConfig, allFiles, uploadPath, concurrency)
+
+      const successCount = results.filter((r) => r.success).length
+      const failedCount = results.length - successCount
+      const durationSeconds = (Date.now() - startTime) / 1000
+      const duration = durationSeconds.toFixed(2)
+      const uploadedBytes = results.reduce((sum, result) => (result.success ? sum + result.size : sum), 0)
+      const retryCount = results.reduce((sum, result) => sum + result.retries, 0)
+      const avgSpeed = durationSeconds > 0 ? uploadedBytes / durationSeconds : 0
+
+      clearScreen()
+      console.log('\n' + chalk.gray('─'.repeat(40)) + '\n')
+
+      if (failedCount === 0) {
+        console.log(`${chalk.green('🎉 部署成功!')}`)
+      } else {
+        console.log(`${chalk.yellow('⚠ 部署完成但存在错误')}`)
+      }
+
+      console.log(`\n${chalk.gray('统计:')}`)
+      console.log(` ${chalk.green('✔')} 成功: ${chalk.bold(successCount)}`)
+      if (failedCount > 0) {
+        console.log(` ${chalk.red('✗')} 失败: ${chalk.bold(failedCount)}`)
+      }
+      console.log(` ${chalk.cyan('⇄')} 重试: ${chalk.bold(retryCount)}`)
+      console.log(` ${chalk.blue('📦')} 数据: ${chalk.bold(formatBytes(uploadedBytes))}`)
+      console.log(` ${chalk.magenta('⚡')} 平均速度: ${chalk.bold(`${formatBytes(avgSpeed)}/s`)}`)
+      console.log(` ${chalk.blue('⏱')} 耗时: ${chalk.bold(duration)}s`)
+
+      if (baseUrl) {
+        console.log(` ${chalk.green('🔗')} 访问地址: ${chalk.bold(buildUrl(protocol, baseUrl, uploadPath))}`)
+      }
+
+      console.log('')
+
+      if (failedCount > 0) {
+        const failedItems = results.filter((result) => !result.success)
+        const previewCount = Math.min(5, failedItems.length)
+        console.log(chalk.red('失败明细:'))
+        for (let i = 0; i < previewCount; i++) {
+          const item = failedItems[i]
+          const reason = item.error?.message || 'unknown error'
+          console.log(` ${chalk.red('•')} ${item.name} => ${reason}`)
+        }
+        if (failedItems.length > previewCount) {
+          console.log(chalk.gray(` ... 还有 ${failedItems.length - previewCount} 个失败文件`))
+        }
+        console.log('')
+      }
+
+      return { name: displayName, totalFiles: results.length, failedCount }
+    } catch (error) {
+      if (preflightSpinner) preflightSpinner.fail(`❌ 上传到 ${displayName} 失败`)
+
+      console.log(`\n${chalk.red('❌ 上传过程中发生错误:')} ${error}\n`)
+      return {
+        name: displayName,
+        totalFiles,
+        failedCount: totalFiles > 0 ? totalFiles : 1,
+        error: error instanceof Error ? error : new Error(String(error)),
+      }
+    } finally {
+      preflightClient.close()
+    }
+  }
+
+  const deployToFtp = async (): Promise<DeployTargetResult[]> => {
     if (!autoUpload) {
       const ftpUploadChoice = await select({
         message: '是否上传FTP',
         choices: ['是', '否'],
         default: '是',
       })
-      if (ftpUploadChoice === '否') return
+      if (ftpUploadChoice === '否') return []
     }
 
     let selectedConfigs: FtpConfig[] = []
 
     if (isMultiFtp) {
-      // 检查是否有默认FTP配置
       if (defaultFtp) {
         const defaultConfig = ftpConfigs.find((ftp) => ftp.name === defaultFtp)
-        if (defaultConfig) {
-          if (validateFtpConfig(defaultConfig)) {
-            console.log(chalk.blue(`使用默认FTP配置: ${defaultFtp}`))
-            selectedConfigs = [defaultConfig]
-          } else {
-            console.log(chalk.yellow(`⚠️ 默认FTP配置 "${defaultFtp}" 缺少必需参数，将进行手动选择`))
-          }
+        if (defaultConfig && validateFtpConfig(defaultConfig)) {
+          console.log(chalk.blue(`使用默认FTP配置: ${defaultFtp}`))
+          selectedConfigs = [defaultConfig]
+        } else if (defaultConfig) {
+          console.log(chalk.yellow(`⚠ 默认FTP配置 "${defaultFtp}" 缺少必需参数，将进行手动选择`))
         }
       }
 
-      // 如果没有找到默认配置或没有设置默认配置，则进行手动选择
       if (selectedConfigs.length === 0) {
-        // 过滤出有效的配置用于选择
         const validConfigs = ftpConfigs.filter(validateFtpConfig)
         const invalidConfigs = ftpConfigs.filter((config) => !validateFtpConfig(config))
 
-        // 如果有无效配置，显示警告
         if (invalidConfigs.length > 0) {
-          console.log(chalk.yellow('\n 以下FTP配置缺少必需参数，已从选择列表中排除:'))
+          console.log(chalk.yellow('\n以下FTP配置缺少必需参数，已从选择列表中排除:'))
           invalidConfigs.forEach((config) => {
             const missing = []
             if (!config.host) missing.push('host')
@@ -153,182 +606,101 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
         if (validConfigs.length === 0) {
           console.error(chalk.red('❌ 没有可用的有效FTP配置'))
-          return
+          return []
         }
 
-        const choices = validConfigs.map((ftp) => ({
-          name: ftp.name,
-          value: ftp,
-        }))
-
-        selectedConfigs = await checkbox({
+        selectedConfigs = (await checkbox({
           message: '选择要上传的FTP服务器（可多选）',
-          choices,
+          choices: validConfigs.map((ftp) => ({
+            name: ftp.name || ftp.host || '未命名FTP',
+            value: ftp,
+          })),
           required: true,
-        })
+        })) as FtpConfig[]
       }
     } else {
-      // 单个FTP配置，验证并添加默认的name属性
       const singleConfig = ftpConfigs[0] as FtpConfig
       if (validateFtpConfig(singleConfig)) {
         selectedConfigs = [{ ...singleConfig, name: singleConfig.name || singleConfig.host }]
       } else {
         const missing = []
-        if (!singleConfig.host) missing.push('host')
-        if (!singleConfig.user) missing.push('user')
-        if (!singleConfig.password) missing.push('password')
+        if (!singleConfig?.host) missing.push('host')
+        if (!singleConfig?.user) missing.push('user')
+        if (!singleConfig?.password) missing.push('password')
         console.error(chalk.red(`❌ FTP配置缺少必需参数: ${missing.join(', ')}`))
+        return []
+      }
+    }
+
+    const deployResults: DeployTargetResult[] = []
+
+    for (const ftpConfig of selectedConfigs) {
+      const targetResult = await deploySingleTarget(ftpConfig)
+      deployResults.push(targetResult)
+    }
+
+    return deployResults
+  }
+
+  return {
+    name: 'vite-plugin-deploy-ftp',
+    apply: 'build',
+    enforce: 'post',
+    buildEnd(error) {
+      if (error) buildFailed = true
+    },
+    config(config) {
+      if (!open || buildFailed) return
+
+      clearScreen()
+
+      const validationErrors = validateOptions()
+      if (validationErrors.length > 0) {
+        console.log(`${chalk.red('✗ 配置错误:')}\n${validationErrors.map((err) => `  - ${err}`).join('\n')}`)
         return
       }
-    }
 
-    // 依次上传到选中的FTP服务器
-    for (const ftpConfig of selectedConfigs) {
-      const { host, port = 21, user, password, alias = '', name } = ftpConfig
+      upload = true
+      return config
+    },
+    configResolved(config) {
+      resolvedConfig = config
+      outDir = normalizePath(path.resolve(config.root, config.build.outDir))
+    },
+    closeBundle: {
+      sequential: true,
+      order: 'post',
+      async handler() {
+        if (!open || !upload || buildFailed || !resolvedConfig) return
 
-      // 验证必需的配置
-      if (!host || !user || !password) {
-        console.error(chalk.red(`❌ FTP配置 "${name || host || '未知'}" 缺少必需参数:`))
-        if (!host) console.error(chalk.red('  - 缺少 host'))
-        if (!user) console.error(chalk.red('  - 缺少 user'))
-        if (!password) console.error(chalk.red('  - 缺少 password'))
-        continue // 跳过这个配置，继续下一个
-      }
+        const deployResults = await deployToFtp()
+        if (deployResults.length === 0) return
 
-      const { protocol, baseUrl } = parseAlias(alias)
-      const displayName = name || host
-
-      // 获取所有需要上传的文件
-      const allFiles = getAllFiles(outDir)
-      const totalFiles = allFiles.length
-
-      console.log(chalk.bold(`\n🚀 FTP 部署开始`))
-      console.log()
-      console.log(`Host:     ${chalk.blue(host)}`)
-      console.log(`User:     ${chalk.blue(user)}`)
-      console.log(`Source:   ${chalk.blue(outDir)}`)
-      console.log(`Target:   ${chalk.blue(uploadPath)}`)
-      console.log(`Files:    ${chalk.blue(totalFiles)}`)
-      console.log()
-
-      const client = new Client()
-      let uploadSpinner: ReturnType<typeof ora> | undefined
-      const startTime = Date.now()
-
-      try {
-        uploadSpinner = ora(`连接到 ${displayName} 中...`).start()
-
-        await connectWithRetry(client, { host, port, user, password }, maxRetries, retryDelay)
-
-        uploadSpinner.color = 'green'
-        uploadSpinner.text = '连接成功'
-        // 稍微延迟一下让用户看到连接成功
-        await new Promise((resolve) => setTimeout(resolve, 500))
-
-        const fileList = await client.list(uploadPath)
-        uploadSpinner.succeed('连接成功!')
-
-        const startDir = await client.pwd()
-
-        if (fileList.length) {
-          if (singleBack) {
-            await createSingleBackup(client, uploadPath, protocol, baseUrl, singleBackFiles, showBackFile)
-          } else {
-            const isBackFiles = await select({
-              message: `是否备份 ${displayName} 的远程文件`,
-              choices: ['否', '是'],
-              default: '否',
-            })
-            if (isBackFiles === '是') {
-              await createBackupFile(client, uploadPath, protocol, baseUrl, showBackFile)
-            }
-          }
+        const failedTargets = deployResults.filter((target) => target.failedCount > 0)
+        if (failedTargets.length > 0 && failOnError) {
+          throw new Error(`Failed to deploy ${failedTargets.length} of ${deployResults.length} FTP targets`)
         }
-
-        // 开始上传
-        const progressSpinner = ora('准备上传...').start()
-
-        let uploadedCount = 0
-
-        // 分组文件以减少目录切换
-        const groups: Record<string, string[]> = {}
-        for (const file of allFiles) {
-          const dir = path.dirname(file)
-          if (!groups[dir]) groups[dir] = []
-          groups[dir].push(path.basename(file))
-        }
-
-        for (const relDir of Object.keys(groups)) {
-          await client.cd(startDir) // 确保每次从初始目录开始
-          const remoteDir = normalizePath(path.join(uploadPath, relDir))
-          await client.ensureDir(remoteDir)
-
-          for (const fileName of groups[relDir]) {
-            const currentFile = path.join(relDir, fileName)
-            const displayPath = normalizePath(currentFile)
-            progressSpinner.text = `正在上传: ${chalk.dim(displayPath)}\n${formatProgressBar(uploadedCount, totalFiles)}`
-
-            const localFile = path.join(outDir, relDir, fileName)
-            await client.uploadFrom(localFile, fileName)
-            uploadedCount++
-          }
-        }
-
-        progressSpinner.succeed('所有文件上传完成!')
-        console.log(chalk.green(formatProgressBar(totalFiles, totalFiles)))
-        process.stdout.write('\x1b[2J\x1b[0f')
-        console.log(chalk.gray('\n────────────────────────────────────────\n'))
-
-        const duration = ((Date.now() - startTime) / 1000).toFixed(2)
-        console.log(`🎉 部署成功!`)
-        console.log()
-        console.log(`统计:`)
-        console.log(` ✔ 成功: ${chalk.green(totalFiles)}`)
-        console.log(` ⏱ 耗时: ${chalk.green(duration + 's')}`)
-        console.log()
-
-        if (baseUrl) {
-          console.log(`访问地址: ${chalk.green(buildUrl(protocol, baseUrl, uploadPath))}`)
-          console.log()
-        }
-      } catch (error) {
-        if (uploadSpinner) {
-          uploadSpinner.fail(`❌ 上传到 ${displayName} 失败`)
-        }
-        console.error(chalk.red(`❌ 上传到 ${displayName} 失败:`), error instanceof Error ? error.message : error)
-        throw error
-      } finally {
-        client.close()
-      }
-    }
+      },
+    },
   }
 }
 
 function getAllFiles(dirPath: string, arrayOfFiles: string[] = [], relativePath = '') {
   const files = fs.readdirSync(dirPath)
 
-  files.forEach(function (file) {
+  files.forEach((file) => {
     const fullPath = path.join(dirPath, file)
     const relPath = path.join(relativePath, file)
     if (fs.statSync(fullPath).isDirectory()) {
       getAllFiles(fullPath, arrayOfFiles, relPath)
     } else {
-      arrayOfFiles.push(relPath)
+      arrayOfFiles.push(normalizePath(relPath))
     }
   })
 
   return arrayOfFiles
 }
 
-function formatProgressBar(current: number, total: number, width = 30) {
-  const percentage = Math.round((current / total) * 100)
-  const filled = Math.round((width * current) / total)
-  const empty = width - filled
-  const bar = '█'.repeat(filled) + '░'.repeat(empty)
-  return `${bar} ${percentage}% (${current}/${total})`
-}
-
-// 辅助函数
 function validateFtpConfig(
   config: FtpConfig,
 ): config is Required<Pick<FtpConfig, 'host' | 'user' | 'password'>> & FtpConfig {
@@ -343,15 +715,16 @@ function parseAlias(alias: string = '') {
   }
 }
 
-function buildUrl(protocol: string, baseUrl: string, path: string) {
-  return protocol + normalizePath(baseUrl + path)
+function buildUrl(protocol: string, baseUrl: string, targetPath: string) {
+  return protocol + normalizePath(baseUrl + targetPath)
 }
 
 async function connectWithRetry(
   client: Client,
-  config: { host: string; port: number; user: string; password: string },
+  config: FtpConnectConfig,
   maxRetries: number,
   retryDelay: number,
+  silentLogs = false,
 ) {
   let lastError: Error | undefined
 
@@ -363,13 +736,15 @@ async function connectWithRetry(
         secure: true,
         secureOptions: { rejectUnauthorized: false, timeout: 60000 },
       })
-      return // 成功连接
+      return
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
 
       if (attempt < maxRetries) {
-        console.log(chalk.yellow(`⚠️ 连接失败，${retryDelay}ms 后重试 (${attempt}/${maxRetries})`))
-        await new Promise((resolve) => setTimeout(resolve, retryDelay))
+        if (!silentLogs) {
+          console.log(chalk.yellow(`⚠ 连接失败，${retryDelay}ms 后重试 (${attempt}/${maxRetries})`))
+        }
+        await sleep(retryDelay * attempt)
       }
     }
   }
@@ -378,7 +753,6 @@ async function connectWithRetry(
 }
 
 function createTempDir(basePath: string): TempDir {
-  // 使用系统临时目录，避免在项目目录中创建临时文件
   const tempBaseDir = os.tmpdir()
   const tempPath = path.join(tempBaseDir, 'vite-plugin-deploy-ftp', basePath)
 
@@ -394,7 +768,7 @@ function createTempDir(basePath: string): TempDir {
           fs.rmSync(tempPath, { recursive: true, force: true })
         }
       } catch (error) {
-        console.warn(chalk.yellow(`⚠️ 清理临时目录失败: ${tempPath}`), error)
+        console.warn(chalk.yellow(`⚠ 清理临时目录失败: ${tempPath}`), error)
       }
     },
   }
@@ -414,15 +788,15 @@ async function createBackupFile(
   const zipFilePath = path.join(os.tmpdir(), 'vite-plugin-deploy-ftp', fileName)
 
   try {
-    // 确保zip文件的目录存在
     const zipDir = path.dirname(zipFilePath)
     if (!fs.existsSync(zipDir)) {
       fs.mkdirSync(zipDir, { recursive: true })
     }
 
-    // 获取远程文件列表，过滤掉已有的备份文件
     const remoteFiles = await client.list(dir)
-    const filteredFiles = remoteFiles.filter((file) => !file.name.startsWith('backup_') || !file.name.endsWith('.zip'))
+    const filteredFiles = remoteFiles.filter(
+      (file) => !(file.name.startsWith('backup_') && file.name.endsWith('.zip')),
+    )
 
     if (showBackFile) {
       console.log(chalk.cyan(`\n开始备份远程文件，共 ${filteredFiles.length} 个文件:`))
@@ -431,46 +805,39 @@ async function createBackupFile(
       })
     }
 
-    // 逐个下载过滤后的文件，跳过备份文件
     for (const file of filteredFiles) {
       if (file.type === 1) {
-        // 只下载普通文件，跳过目录
         await client.downloadTo(path.join(tempDir.path, file.name), normalizePath(`${dir}/${file.name}`))
       }
     }
 
     backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`
 
-    // 创建压缩文件
     await createZipFile(tempDir.path, zipFilePath)
 
     backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(
-      `==> ${buildUrl(protocol, baseUrl, dir + '/' + fileName)}`,
+      `==> ${buildUrl(protocol, baseUrl, `${dir}/${fileName}`)}`,
     )}`
 
     await client.uploadFrom(zipFilePath, normalizePath(`${dir}/${fileName}`))
 
-    // 生成备份后的完整URL
     const backupUrl = buildUrl(protocol, baseUrl, `${dir}/${fileName}`)
 
     backupSpinner.succeed('备份完成')
-
-    // 输出备份文件的完整路径
     console.log(chalk.cyan('\n备份文件:'))
     console.log(chalk.green(`${backupUrl}`))
-    console.log() // 添加空行分隔
+    console.log()
   } catch (error) {
     backupSpinner.fail('备份失败')
     throw error
   } finally {
     tempDir.cleanup()
-    // 清理zip文件
     try {
       if (fs.existsSync(zipFilePath)) {
         fs.rmSync(zipFilePath)
       }
     } catch (error) {
-      console.warn(chalk.yellow('⚠️ 清理zip文件失败'), error)
+      console.warn(chalk.yellow('⚠ 清理zip文件失败'), error)
     }
   }
 }
@@ -511,7 +878,6 @@ async function createSingleBackup(
   let backupProgressSpinner: ReturnType<typeof ora> | undefined
 
   try {
-    // 获取远程目录下的文件列表
     const remoteFiles = await client.list(dir)
     const backupTasks = singleBackFiles
       .map((fileName) => {
@@ -534,10 +900,8 @@ async function createSingleBackup(
       })
     }
 
-    // 创建新的备份进度spinner
     backupProgressSpinner = ora('正在备份文件...').start()
 
-    // 并发备份文件（限制并发数避免过载）
     const concurrencyLimit = 3
     let backedUpCount = 0
     const backedUpFiles: string[] = []
@@ -547,20 +911,16 @@ async function createSingleBackup(
       const promises = batch.map(async ({ fileName }) => {
         try {
           const localTempPath = path.join(tempDir.path, fileName)
-          const [name, ext] = fileName.split('.')
-          const suffix = ext ? `.${ext}` : ''
-          const backupFileName = `${name}.${timestamp}${suffix}`
+          const extIndex = fileName.lastIndexOf('.')
+          const name = extIndex > -1 ? fileName.slice(0, extIndex) : fileName
+          const ext = extIndex > -1 ? fileName.slice(extIndex) : ''
+          const backupFileName = `${name}.${timestamp}${ext}`
           const backupRemotePath = normalizePath(`${dir}/${backupFileName}`)
 
-          // 下载远程文件到本地临时目录
           await client.downloadTo(localTempPath, normalizePath(`${dir}/${fileName}`))
-          // 上传为带时间戳的新文件名
           await client.uploadFrom(localTempPath, backupRemotePath)
 
-          // 生成备份后的完整URL
-          const backupUrl = buildUrl(protocol, baseUrl, backupRemotePath)
-          backedUpFiles.push(backupUrl)
-
+          backedUpFiles.push(buildUrl(protocol, baseUrl, backupRemotePath))
           return true
         } catch (error) {
           console.warn(chalk.yellow(`备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
@@ -574,13 +934,11 @@ async function createSingleBackup(
 
     if (backedUpCount > 0) {
       backupProgressSpinner.succeed('备份完成')
-
-      // 输出备份后的完整路径
       console.log(chalk.cyan('\n备份文件:'))
       backedUpFiles.forEach((url) => {
         console.log(chalk.green(`🔗  ${url}`))
       })
-      console.log() // 添加空行分隔
+      console.log()
     } else {
       backupProgressSpinner.fail('所有文件备份失败')
     }
