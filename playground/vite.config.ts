@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [
     vitePluginDeployFtp({
       open: true,
-      uploadPath: '__test/vite-plugin-deploy-ftp/',
-      singleBack: true,
+      uploadPath: '/__test/vite-plugin-deploy-ftp/',
+      singleBack: false,
       autoUpload: true,
       defaultFtp: process.env.zH5FtpName,
       ftps: [
@@ -42,6 +42,8 @@ export default defineConfig({
       // alias: process.env.zH5FtpAlias,
     }),
   ],
+
+  base: './',
 
   build: {
     outDir: '__dist__',

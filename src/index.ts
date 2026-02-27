@@ -1,6 +1,5 @@
 import { checkbox, select } from '@inquirer/prompts'
-import archiver from 'archiver'
-import { Client } from 'basic-ftp'
+import { Client, FileType } from 'basic-ftp'
 import chalk from 'chalk'
 import dayjs from 'dayjs'
 import fs from 'node:fs'
@@ -9,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import ora from 'ora'
 import { normalizePath, Plugin, type ResolvedConfig } from 'vite'
+import yazl from 'yazl'
 
 export type vitePluginDeployFtpOption =
   | (BaseOption & {
@@ -132,6 +132,14 @@ const normalizeRemotePath = (targetDir: string, relativeFilePath: string): strin
   return joined.replace(/^\/+/, '')
 }
 
+const normalizeUploadPath = (targetPath: string): string => {
+  const normalized = normalizePath(targetPath).replace(/\/{2,}/g, '/').trim()
+  if (!normalized || normalized === '.' || normalized === '/') return '/'
+
+  const withoutTrailingSlash = normalized.replace(/\/+$/, '')
+  return withoutTrailingSlash.startsWith('/') ? withoutTrailingSlash : `/${withoutTrailingSlash}`
+}
+
 const sleep = async (ms: number) => {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -157,6 +165,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     ? safeOption.ftps || []
     : [{ ...safeOption, name: safeOption.name || safeOption.alias || safeOption.host }]
   const defaultFtp = isMultiFtp ? safeOption.defaultFtp : undefined
+  const normalizedUploadPath = normalizeUploadPath(uploadPath)
 
   let outDir = normalizePath(path.resolve('dist'))
   let upload = false
@@ -206,7 +215,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     task: UploadTask,
     context: {
       client: Client
-      ensuredDirs: Set<string>
       ensureConnected: () => Promise<void>
       markDisconnected: () => void
       silentLogs: boolean
@@ -219,9 +227,8 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         await context.ensureConnected()
 
         const remoteDir = normalizePath(path.posix.dirname(task.remotePath))
-        if (remoteDir && remoteDir !== '.' && !context.ensuredDirs.has(remoteDir)) {
+        if (remoteDir && remoteDir !== '.') {
           await context.client.ensureDir(remoteDir)
-          context.ensuredDirs.add(remoteDir)
         }
 
         await context.client.uploadFrom(task.filePath, path.posix.basename(task.remotePath))
@@ -370,7 +377,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
     const worker = async () => {
       const client = new Client()
-      const ensuredDirs = new Set<string>()
       let connected = false
 
       const ensureConnected = async () => {
@@ -381,7 +387,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
       const markDisconnected = () => {
         connected = false
-        ensuredDirs.clear()
       }
 
       try {
@@ -395,7 +400,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
           const result = await uploadFileWithRetry(task, {
             client,
-            ensuredDirs,
             ensureConnected,
             markDisconnected,
             silentLogs,
@@ -468,7 +472,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     console.log(`${chalk.gray('Server:')}   ${chalk.green(displayName)}`)
     console.log(`${chalk.gray('Host:')}     ${chalk.green(host)}`)
     console.log(`${chalk.gray('Source:')}   ${chalk.yellow(outDir)}`)
-    console.log(`${chalk.gray('Target:')}   ${chalk.yellow(uploadPath)}`)
+    console.log(`${chalk.gray('Target:')}   ${chalk.yellow(normalizedUploadPath)}`)
     if (alias) console.log(`${chalk.gray('Alias:')}    ${chalk.green(alias)}`)
     console.log(`${chalk.gray('Files:')}    ${chalk.blue(totalFiles)}\n`)
 
@@ -480,12 +484,19 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       await connectWithRetry(preflightClient, connectConfig, maxRetries, retryDelay, Boolean(preflightSpinner))
       if (preflightSpinner) preflightSpinner.succeed('连接成功')
 
-      await preflightClient.ensureDir(uploadPath)
-      const fileList = await preflightClient.list(uploadPath)
+      await preflightClient.ensureDir(normalizedUploadPath)
+      const fileList = await preflightClient.list()
 
       if (fileList.length) {
         if (singleBack) {
-          await createSingleBackup(preflightClient, uploadPath, protocol, baseUrl, singleBackFiles, showBackFile)
+          await createSingleBackup(
+            preflightClient,
+            normalizedUploadPath,
+            protocol,
+            baseUrl,
+            singleBackFiles,
+            showBackFile,
+          )
         } else {
           const shouldBackup = await select({
             message: `是否备份 ${displayName} 的远程文件`,
@@ -494,12 +505,23 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           })
 
           if (shouldBackup === '是') {
-            await createBackupFile(preflightClient, uploadPath, protocol, baseUrl, showBackFile)
+            await createBackupFile(
+              preflightClient,
+              normalizedUploadPath,
+              protocol,
+              baseUrl,
+              showBackFile,
+            )
           }
         }
       }
 
-      const results = await uploadFilesInBatches(connectConfig, allFiles, uploadPath, concurrency)
+      const results = await uploadFilesInBatches(
+        connectConfig,
+        allFiles,
+        normalizedUploadPath,
+        concurrency,
+      )
 
       const successCount = results.filter((r) => r.success).length
       const failedCount = results.length - successCount
@@ -529,7 +551,9 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       console.log(` ${chalk.blue('⏱')} 耗时: ${chalk.bold(duration)}s`)
 
       if (baseUrl) {
-        console.log(` ${chalk.green('🔗')} 访问地址: ${chalk.bold(buildUrl(protocol, baseUrl, uploadPath))}`)
+        console.log(
+          ` ${chalk.green('🔗')} 访问地址: ${chalk.bold(buildUrl(protocol, baseUrl, normalizedUploadPath))}`,
+        )
       }
 
       console.log('')
@@ -719,6 +743,58 @@ function buildUrl(protocol: string, baseUrl: string, targetPath: string) {
   return protocol + normalizePath(baseUrl + targetPath)
 }
 
+const backupArchivePattern = /^backup_\d{8}_\d{6}\.zip$/i
+
+async function downloadRemoteFilesForBackup(
+  client: Client,
+  remoteDir: string,
+  localDir: string,
+  downloadedFiles: Array<{ remotePath: string; size: number }> = [],
+) {
+  if (!fs.existsSync(localDir)) {
+    fs.mkdirSync(localDir, { recursive: true })
+  }
+
+  const remoteEntries = await client.list(remoteDir)
+
+  for (const entry of remoteEntries) {
+    const remotePath = normalizePath(`${remoteDir}/${entry.name}`)
+    const localPath = path.join(localDir, entry.name)
+
+    if (entry.type === FileType.Directory) {
+      await downloadRemoteFilesForBackup(client, remotePath, localPath, downloadedFiles)
+      continue
+    }
+
+    if (entry.type === FileType.SymbolicLink) {
+      continue
+    }
+
+    if (backupArchivePattern.test(entry.name)) {
+      continue
+    }
+
+    if (entry.type === FileType.File) {
+      await client.downloadTo(localPath, remotePath)
+      downloadedFiles.push({ remotePath, size: entry.size })
+      continue
+    }
+
+    try {
+      await client.downloadTo(localPath, remotePath)
+      downloadedFiles.push({ remotePath, size: entry.size })
+    } catch (downloadError) {
+      try {
+        await downloadRemoteFilesForBackup(client, remotePath, localPath, downloadedFiles)
+      } catch {
+        throw downloadError
+      }
+    }
+  }
+
+  return downloadedFiles
+}
+
 async function connectWithRetry(
   client: Client,
   config: FtpConnectConfig,
@@ -793,22 +869,20 @@ async function createBackupFile(
       fs.mkdirSync(zipDir, { recursive: true })
     }
 
-    const remoteFiles = await client.list(dir)
-    const filteredFiles = remoteFiles.filter(
-      (file) => !(file.name.startsWith('backup_') && file.name.endsWith('.zip')),
-    )
+    backupSpinner.text = `下载远程文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`
 
-    if (showBackFile) {
-      console.log(chalk.cyan(`\n开始备份远程文件，共 ${filteredFiles.length} 个文件:`))
-      filteredFiles.forEach((file) => {
-        console.log(chalk.gray(`  - ${file.name} (${file.size} bytes)`))
-      })
+    const downloadedFiles = await downloadRemoteFilesForBackup(client, dir, tempDir.path)
+
+    if (downloadedFiles.length === 0) {
+      backupSpinner.warn('未找到可备份的远程文件')
+      return
     }
 
-    for (const file of filteredFiles) {
-      if (file.type === 1) {
-        await client.downloadTo(path.join(tempDir.path, file.name), normalizePath(`${dir}/${file.name}`))
-      }
+    if (showBackFile) {
+      console.log(chalk.cyan(`\n开始备份远程文件，共 ${downloadedFiles.length} 个文件:`))
+      downloadedFiles.forEach((file) => {
+        console.log(chalk.gray(`  - ${file.remotePath} (${file.size} bytes)`))
+      })
     }
 
     backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`
@@ -845,21 +919,24 @@ async function createBackupFile(
 async function createZipFile(sourceDir: string, outputPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(outputPath)
-    const archive = archiver('zip', {
-      zlib: { level: 9 },
-    })
+    const zipFile = new yazl.ZipFile()
 
-    output.on('close', () => {
-      resolve()
-    })
+    const handleError = (error: unknown) => {
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
 
-    archive.on('error', (err) => {
-      reject(err)
-    })
+    output.on('close', resolve)
+    output.on('error', handleError)
+    zipFile.outputStream.on('error', handleError)
 
-    archive.pipe(output)
-    archive.directory(sourceDir, false)
-    archive.finalize()
+    zipFile.outputStream.pipe(output)
+
+    for (const relativePath of getAllFiles(sourceDir)) {
+      const filePath = path.join(sourceDir, relativePath)
+      zipFile.addFile(filePath, normalizePath(relativePath))
+    }
+
+    zipFile.end()
   })
 }
 

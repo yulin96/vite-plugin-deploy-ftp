@@ -39,6 +39,7 @@
   "description": "将dist目录下的文件上传到ftp服务器",
   "devDependencies": {
     "@types/node": "^22.15.32",
+    "@types/yazl": "^3.3.0",
     "tsup": "^8.5.0",
     "typescript": "^5.8.3"
   },
@@ -47,11 +48,10 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^7.5.3",
-    "@types/archiver": "^6.0.3",
-    "archiver": "^7.0.1",
     "basic-ftp": "^5.0.5",
     "chalk": "^5.4.1",
     "dayjs": "^1.11.13",
-    "ora": "^8.2.0"
+    "ora": "^8.2.0",
+    "yazl": "^3.3.1"
   }
 }
