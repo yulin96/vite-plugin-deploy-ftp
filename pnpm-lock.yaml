@@ -24,7 +24,7 @@ importers:
         specifier: ^8.2.0
         version: 8.2.0
       vite:
-        specifier: ^6.0.3 || ^7
+        specifier: ^6.0.3 || ^7 || ^8
         version: 7.0.0(@types/node@22.15.32)
       yazl:
         specifier: ^3.3.1
