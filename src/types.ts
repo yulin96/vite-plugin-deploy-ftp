@@ -2,6 +2,7 @@ export interface BaseOption {
   uploadPath: string
   singleBackFiles?: string[]
   singleBack?: boolean
+  debug?: boolean
   open?: boolean
   maxRetries?: number
   retryDelay?: number

@@ -47,6 +47,34 @@ export type {
 
 const backupArchivePattern = /^backup_\d{8}_\d{6}\.zip$/i
 
+interface DebugTimingEntry {
+  label: string
+  durationMs: number
+  detail?: string
+}
+
+interface UploadDebugMetrics {
+  connectMs: number
+  rootDirMs: number
+  switchDirMs: number
+  uploadMs: number
+}
+
+interface UploadBatchExecution {
+  results: UploadResult[]
+  debugEntries: DebugTimingEntry[]
+}
+
+interface ReusableUploadClient {
+  client: Client
+}
+
+const formatTimingDuration = (durationMs: number): string => {
+  if (durationMs < 1000) return `${durationMs}ms`
+  const seconds = durationMs / 1000
+  return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`
+}
+
 const renderBackupPanel = (summary: BackupSummary): string => {
   const previewItems = summary.items.slice(0, 2)
   const rows = [
@@ -67,6 +95,19 @@ const renderBackupPanel = (summary: BackupSummary): string => {
   return renderPanel(`${getLogSymbol('success')} ${summary.title}`, rows, 'success')
 }
 
+const renderDebugPanel = (entries: DebugTimingEntry[]): string => {
+  const rows = entries.map((entry) => ({
+    label: `${entry.label}:`,
+    value: chalk.cyan(
+      entry.detail
+        ? `${formatTimingDuration(entry.durationMs)} · ${truncateTerminalText(entry.detail, 24)}`
+        : formatTimingDuration(entry.durationMs),
+    ),
+  }))
+
+  return renderPanel('调试耗时', rows, 'info')
+}
+
 export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): Plugin {
   const safeOption = (option || {}) as vitePluginDeployFtpOption
   const {
@@ -75,12 +116,13 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     singleBack = false,
     singleBackFiles = ['index.html'],
     showBackFile = false,
+    debug = false,
     maxRetries = 3,
     retryDelay = 1000,
     autoUpload = false,
     fancy = true,
     failOnError = true,
-    concurrency = 3,
+    concurrency = 1,
   } = safeOption
 
   const isMultiFtp = 'ftps' in safeOption
@@ -144,6 +186,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       silentLogs: boolean
       maxRetries: number
       retryDelay: number
+      debugMetrics?: UploadDebugMetrics
     },
   ): Promise<UploadResult> => {
     for (let attempt = 1; attempt <= context.maxRetries; attempt++) {
@@ -155,7 +198,11 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           await context.ensureRemoteDir(remoteDir)
         }
 
+        const uploadStartedAt = Date.now()
         await context.client.uploadFrom(task.filePath, path.posix.basename(task.remotePath))
+        if (context.debugMetrics) {
+          context.debugMetrics.uploadMs += Date.now() - uploadStartedAt
+        }
         return {
           success: true,
           file: task.filePath,
@@ -205,13 +252,16 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     }
   }
 
-  const uploadFilesInBatches = async (
-    connectConfig: FtpConnectConfig,
-    files: string[],
-    targetDir: string,
-    windowSize: number = concurrency,
-  ): Promise<UploadResult[]> => {
+  const uploadFilesInBatches = async (context: {
+    connectConfig: FtpConnectConfig
+    files: string[]
+    targetDir: string
+    windowSize?: number
+    reusableClient?: ReusableUploadClient
+  }): Promise<UploadBatchExecution> => {
+    const { connectConfig, files, targetDir, windowSize = concurrency, reusableClient } = context
     const results: UploadResult[] = []
+    const debugEntries: DebugTimingEntry[] = []
     const totalFiles = files.length
     const tasks: UploadTask[] = []
     const taskGroups: UploadTaskGroup[] = []
@@ -221,6 +271,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     let uploadedBytes = 0
     let retries = 0
 
+    const taskPrepareStartedAt = Date.now()
     const taskCandidates = await Promise.all(
       files.map(async (relativeFilePath) => {
         const filePath = normalizePath(path.resolve(outDir, relativeFilePath))
@@ -252,7 +303,14 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       }
     }
 
+    debugEntries.push({
+      label: '生成上传任务',
+      durationMs: Date.now() - taskPrepareStartedAt,
+      detail: `${tasks.length} 个文件`,
+    })
+
     const normalizedTargetDir = normalizeFtpUploadPath(targetDir)
+    const groupStartedAt = Date.now()
     const groupsByRelativeDir = new Map<string, UploadTask[]>()
     for (const task of tasks) {
       const remoteDir = normalizePath(path.posix.dirname(task.remotePath))
@@ -275,10 +333,16 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     }
 
     taskGroups.sort((left, right) => left.remoteDir.localeCompare(right.remoteDir))
+    debugEntries.push({
+      label: '目录分组',
+      durationMs: Date.now() - groupStartedAt,
+      detail: `${taskGroups.length} 组`,
+    })
 
     const totalBytes = tasks.reduce((sum, task) => sum + task.size, 0)
     const startAt = Date.now()
     const safeWindowSize = Math.max(1, Math.min(windowSize, taskGroups.length || 1))
+    const extraWorkerCount = reusableClient ? Math.max(0, safeWindowSize - 1) : safeWindowSize
     const silentLogs = Boolean(useInteractiveOutput)
     const progressBar = useInteractiveOutput
       ? new cliProgress.SingleBar({
@@ -293,6 +357,12 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       : null
     const reportEvery = Math.max(1, Math.ceil(totalFiles / 6))
     let lastReportedCompleted = -1
+    const debugMetrics: UploadDebugMetrics = {
+      connectMs: 0,
+      rootDirMs: 0,
+      switchDirMs: 0,
+      uploadMs: 0,
+    }
 
     if (progressBar) {
       progressBar.start(totalFiles, 0, {
@@ -342,17 +412,21 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
       const ensureConnected = async () => {
         if (connected) return
+        const connectStartedAt = Date.now()
         await connectWithRetry(client, connectConfig, maxRetries, retryDelay, true)
         connected = true
         rooted = false
         currentRelativeDir = ''
+        debugMetrics.connectMs += Date.now() - connectStartedAt
       }
 
       const ensureRootDir = async () => {
         if (rooted) return
+        const rootStartedAt = Date.now()
         await client.ensureDir(normalizedTargetDir)
         rooted = true
         currentRelativeDir = ''
+        debugMetrics.rootDirMs += Date.now() - rootStartedAt
       }
 
       const ensureRemoteDir = async (remoteDir: string) => {
@@ -364,11 +438,14 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         if (currentRelativeDir === relativeDir) return
 
         if (!relativeDir) {
+          const switchStartedAt = Date.now()
           await client.cd(normalizedTargetDir)
           currentRelativeDir = ''
+          debugMetrics.switchDirMs += Date.now() - switchStartedAt
           return
         }
 
+        const switchStartedAt = Date.now()
         await client.cd(normalizedTargetDir)
         if (!ensuredRelativeDirs.has(relativeDir)) {
           await client.ensureDir(relativeDir)
@@ -377,6 +454,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           await client.cd(relativeDir)
         }
         currentRelativeDir = relativeDir
+        debugMetrics.switchDirMs += Date.now() - switchStartedAt
       }
 
       const markDisconnected = () => {
@@ -403,6 +481,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
               silentLogs,
               maxRetries,
               retryDelay,
+              debugMetrics,
             })
 
             completed++
@@ -421,10 +500,107 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       }
     }
 
+    const runReusableWorker = async (seed: ReusableUploadClient) => {
+      const client = seed.client
+      let connected = true
+      let currentRelativeDir = ''
+      let rooted = false
+      const ensuredRelativeDirs = new Set<string>()
+
+      const ensureConnected = async () => {
+        if (connected) return
+        const connectStartedAt = Date.now()
+        await connectWithRetry(client, connectConfig, maxRetries, retryDelay, true)
+        connected = true
+        rooted = false
+        currentRelativeDir = ''
+        debugMetrics.connectMs += Date.now() - connectStartedAt
+      }
+
+      const ensureRootDir = async () => {
+        if (rooted) return
+        const rootStartedAt = Date.now()
+        await client.ensureDir(normalizedTargetDir)
+        rooted = true
+        currentRelativeDir = ''
+        debugMetrics.rootDirMs += Date.now() - rootStartedAt
+      }
+
+      const ensureRemoteDir = async (remoteDir: string) => {
+        await ensureRootDir()
+
+        const relativeDir =
+          remoteDir === normalizedTargetDir ? '' : remoteDir.slice(normalizedTargetDir.length).replace(/^\/+/, '')
+
+        if (currentRelativeDir === relativeDir) return
+
+        if (!relativeDir) {
+          const switchStartedAt = Date.now()
+          await client.cd(normalizedTargetDir)
+          currentRelativeDir = ''
+          debugMetrics.switchDirMs += Date.now() - switchStartedAt
+          return
+        }
+
+        const switchStartedAt = Date.now()
+        await client.cd(normalizedTargetDir)
+        if (!ensuredRelativeDirs.has(relativeDir)) {
+          await client.ensureDir(relativeDir)
+          ensuredRelativeDirs.add(relativeDir)
+        } else {
+          await client.cd(relativeDir)
+        }
+        currentRelativeDir = relativeDir
+        debugMetrics.switchDirMs += Date.now() - switchStartedAt
+      }
+
+      const markDisconnected = () => {
+        connected = false
+        rooted = false
+        currentRelativeDir = ''
+        ensuredRelativeDirs.clear()
+      }
+
+      while (true) {
+        const groupIndex = currentGroupIndex++
+        if (groupIndex >= taskGroups.length) return
+
+        const taskGroup = taskGroups[groupIndex]
+        for (const task of taskGroup.tasks) {
+          updateProgress()
+
+          const result = await uploadFileWithRetry(task, {
+            client,
+            ensureConnected,
+            ensureRemoteDir,
+            markDisconnected,
+            silentLogs,
+            maxRetries,
+            retryDelay,
+            debugMetrics,
+          })
+
+          completed++
+          retries += result.retries
+          if (result.success) {
+            uploadedBytes += result.size
+          } else {
+            failed++
+          }
+          results.push(result)
+          updateProgress()
+        }
+      }
+    }
+
     updateProgress()
 
     try {
-      await Promise.all(Array.from({ length: safeWindowSize }, () => worker()))
+      const workers = Array.from({ length: extraWorkerCount }, () => worker())
+      if (reusableClient) {
+        workers.unshift(runReusableWorker(reusableClient))
+      }
+      await Promise.all(workers)
     } finally {
       if (refreshTimer) clearInterval(refreshTimer)
     }
@@ -441,7 +617,31 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       console.log(`${getLogSymbol('success')} 所有文件上传完成 (${totalFiles}/${totalFiles})`)
     }
 
-    return results
+    debugEntries.push(
+      {
+        label: '连接服务器',
+        durationMs: debugMetrics.connectMs,
+      },
+      {
+        label: '准备根目录',
+        durationMs: debugMetrics.rootDirMs,
+      },
+      {
+        label: '切换子目录',
+        durationMs: debugMetrics.switchDirMs,
+      },
+      {
+        label: '文件传输',
+        durationMs: debugMetrics.uploadMs,
+        detail: `${tasks.length} 个文件`,
+      },
+      {
+        label: '上传阶段',
+        durationMs: Date.now() - startAt,
+      },
+    )
+
+    return { results, debugEntries }
   }
 
   const deploySingleTarget = async (ftpConfig: FtpConfig): Promise<DeployTargetResult> => {
@@ -456,7 +656,14 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       return { name: name || host || 'unknown', totalFiles: 0, failedCount: 1 }
     }
 
+    const debugEntries: DebugTimingEntry[] = []
+    const collectFilesStartedAt = Date.now()
     const allFiles = getAllFiles(outDir)
+    debugEntries.push({
+      label: '扫描本地文件',
+      durationMs: Date.now() - collectFilesStartedAt,
+      detail: `${allFiles.length} 个文件`,
+    })
     const totalFiles = allFiles.length
     const displayName = name || host
     const startTime = Date.now()
@@ -498,15 +705,34 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const preflightSpinner = useInteractiveOutput ? ora(`连接到 ${displayName}...`).start() : null
 
     try {
+      const preflightConnectStartedAt = Date.now()
       await connectWithRetry(preflightClient, connectConfig, maxRetries, retryDelay, Boolean(preflightSpinner))
+      debugEntries.push({
+        label: '预检连接',
+        durationMs: Date.now() - preflightConnectStartedAt,
+      })
       if (preflightSpinner) preflightSpinner.stop()
 
+      const ensureTargetStartedAt = Date.now()
       await preflightClient.ensureDir(normalizedUploadPath)
+      debugEntries.push({
+        label: '确认目标目录',
+        durationMs: Date.now() - ensureTargetStartedAt,
+        detail: normalizedUploadPath,
+      })
+
+      const listRemoteStartedAt = Date.now()
       const fileList = await preflightClient.list()
+      debugEntries.push({
+        label: '读取远端文件',
+        durationMs: Date.now() - listRemoteStartedAt,
+        detail: `${fileList.length} 个`,
+      })
       let backupSummary: BackupSummary | null = null
 
       if (fileList.length) {
         if (singleBack) {
+          const backupStartedAt = Date.now()
           backupSummary = await createSingleBackup(
             preflightClient,
             normalizedUploadPath,
@@ -515,6 +741,11 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
             showBackFile,
             useInteractiveOutput,
           )
+          debugEntries.push({
+            label: '执行备份',
+            durationMs: Date.now() - backupStartedAt,
+            detail: backupSummary ? `${backupSummary.items.length} 个备份文件` : '未生成备份',
+          })
         } else {
           const shouldBackup = await select({
             message: `是否备份 ${displayName} 的远程文件`,
@@ -523,6 +754,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           })
 
           if (shouldBackup === '是') {
+            const backupStartedAt = Date.now()
             backupSummary = await createBackupFile(
               preflightClient,
               normalizedUploadPath,
@@ -530,15 +762,42 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
               showBackFile,
               useInteractiveOutput,
             )
+            debugEntries.push({
+              label: '执行备份',
+              durationMs: Date.now() - backupStartedAt,
+              detail: backupSummary ? `${backupSummary.items.length} 个备份文件` : '未生成备份',
+            })
+          } else if (debug) {
+            debugEntries.push({
+              label: '执行备份',
+              durationMs: 0,
+              detail: '手动跳过',
+            })
           }
         }
+      } else if (debug) {
+        debugEntries.push({
+          label: '执行备份',
+          durationMs: 0,
+          detail: '远端为空，跳过',
+        })
       }
 
       if (backupSummary) {
         console.log(renderBackupPanel(backupSummary))
       }
 
-      const results = await uploadFilesInBatches(connectConfig, allFiles, normalizedUploadPath, concurrency)
+      const uploadExecution = await uploadFilesInBatches({
+        connectConfig,
+        files: allFiles,
+        targetDir: normalizedUploadPath,
+        windowSize: concurrency,
+        reusableClient: { client: preflightClient },
+      })
+      const { results, debugEntries: uploadDebugEntries } = uploadExecution
+      if (debug) {
+        debugEntries.push(...uploadDebugEntries)
+      }
 
       const successCount = results.filter((r) => r.success).length
       const failedCount = results.length - successCount
@@ -597,11 +856,26 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         ),
       )
 
+      if (debug) {
+        debugEntries.push({
+          label: '总耗时',
+          durationMs: Date.now() - startTime,
+        })
+        console.log(renderDebugPanel(debugEntries))
+      }
+
       return { name: displayName, totalFiles: results.length, failedCount }
     } catch (error) {
       if (preflightSpinner) preflightSpinner.stop()
 
       console.log(`\n${getLogSymbol('danger')} 上传过程中发生错误: ${error}\n`)
+      if (debug && debugEntries.length > 0) {
+        debugEntries.push({
+          label: '失败前耗时',
+          durationMs: Date.now() - startTime,
+        })
+        console.log(renderDebugPanel(debugEntries))
+      }
       return {
         name: displayName,
         totalFiles,
