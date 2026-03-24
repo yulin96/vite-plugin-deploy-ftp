@@ -6,7 +6,7 @@ export default defineConfig({
     vitePluginDeployFtp({
       open: true,
       uploadPath: '/__test/vite-plugin-deploy-ftp/',
-      singleBack: false,
+      singleBack: true,
       autoUpload: true,
       defaultFtp: process.env.zH5FtpName,
       ftps: [

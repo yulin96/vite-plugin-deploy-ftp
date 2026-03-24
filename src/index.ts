@@ -8,141 +8,38 @@ import os from 'node:os'
 import path from 'node:path'
 import ora from 'ora'
 import { normalizePath, Plugin, type ResolvedConfig } from 'vite'
-import yazl from 'yazl'
+import type {
+  DeployTargetResult,
+  FtpConfig,
+  FtpConnectConfig,
+  UploadResult,
+  UploadTask,
+  vitePluginDeployFtpOption,
+} from './types'
+import { connectWithRetry, sleep, validateFtpConfig } from './utils/ftp'
+import { createTempDir, createZipFile, getAllFiles } from './utils/file'
+import {
+  normalizeFtpUploadPath,
+  normalizeRemotePath,
+  normalizeSelectionPath,
+  normalizeUrlLikeBase,
+  resolveDisplayUrl,
+} from './utils/path'
+import { buildCapsuleBar, formatBytes, formatDuration, trimMiddle } from './utils/progress'
 
-export type vitePluginDeployFtpOption =
-  | (BaseOption & {
-      ftps: FtpConfig[]
-      defaultFtp?: string
-    })
-  | (BaseOption & FtpConfig)
+export type {
+  BaseOption,
+  DeployTargetResult,
+  FtpConfig,
+  FtpConnectConfig,
+  TempDir,
+  UploadResult,
+  UploadTask,
+  ValidFtpConfig,
+  vitePluginDeployFtpOption,
+} from './types'
 
-interface TempDir {
-  path: string
-  cleanup: () => void
-}
-
-interface BaseOption {
-  uploadPath: string
-  singleBackFiles?: string[]
-  singleBack?: boolean
-  open?: boolean
-  maxRetries?: number
-  retryDelay?: number
-  showBackFile?: boolean
-  autoUpload?: boolean
-  fancy?: boolean
-  failOnError?: boolean
-  concurrency?: number
-}
-
-interface FtpConfig {
-  name?: string
-  host?: string
-  port?: number
-  user?: string
-  password?: string
-  alias?: string
-}
-
-interface UploadResult {
-  success: boolean
-  file: string
-  name: string
-  size: number
-  retries: number
-  error?: Error
-}
-
-interface UploadTask {
-  filePath: string
-  remotePath: string
-  size: number
-}
-
-interface FtpConnectConfig {
-  host: string
-  port: number
-  user: string
-  password: string
-}
-
-interface DeployTargetResult {
-  name: string
-  totalFiles: number
-  failedCount: number
-  error?: Error
-}
-
-const formatBytes = (bytes: number): string => {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let unitIndex = 0
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex++
-  }
-
-  const digits = value >= 100 || unitIndex === 0 ? 0 : 1
-  return `${value.toFixed(digits)} ${units[unitIndex]}`
-}
-
-const formatDuration = (seconds: number): string => {
-  if (!Number.isFinite(seconds) || seconds < 0) return '--'
-
-  const rounded = Math.round(seconds)
-  const mins = Math.floor(rounded / 60)
-  const secs = rounded % 60
-
-  if (mins === 0) return `${secs}s`
-  return `${mins}m${String(secs).padStart(2, '0')}s`
-}
-
-const trimMiddle = (text: string, maxLength: number): string => {
-  if (text.length <= maxLength) return text
-  if (maxLength <= 10) return text.slice(0, maxLength)
-
-  const leftLength = Math.floor((maxLength - 3) / 2)
-  const rightLength = maxLength - 3 - leftLength
-  return `${text.slice(0, leftLength)}...${text.slice(-rightLength)}`
-}
-
-const buildCapsuleBar = (ratio: number, width = 30): string => {
-  const safeRatio = Math.max(0, Math.min(1, ratio))
-  if (width <= 0) return ''
-
-  if (safeRatio >= 1) {
-    return chalk.green('█'.repeat(width))
-  }
-
-  const pointerIndex = Math.min(width - 1, Math.floor(width * safeRatio))
-  const done = pointerIndex > 0 ? chalk.green('█'.repeat(pointerIndex)) : ''
-  const pointer = chalk.cyanBright('▸')
-  const pending = pointerIndex < width - 1 ? chalk.gray('░'.repeat(width - pointerIndex - 1)) : ''
-
-  return `${done}${pointer}${pending}`
-}
-
-const normalizeRemotePath = (targetDir: string, relativeFilePath: string): string => {
-  const joined = normalizePath(`${targetDir}/${relativeFilePath}`).replace(/\/{2,}/g, '/')
-  if (targetDir.startsWith('/')) return joined.startsWith('/') ? joined : `/${joined}`
-  return joined.replace(/^\/+/, '')
-}
-
-const normalizeUploadPath = (targetPath: string): string => {
-  const normalized = normalizePath(targetPath).replace(/\/{2,}/g, '/').trim()
-  if (!normalized || normalized === '.' || normalized === '/') return '/'
-
-  const withoutTrailingSlash = normalized.replace(/\/+$/, '')
-  return withoutTrailingSlash.startsWith('/') ? withoutTrailingSlash : `/${withoutTrailingSlash}`
-}
-
-const sleep = async (ms: number) => {
-  await new Promise((resolve) => setTimeout(resolve, ms))
-}
+const backupArchivePattern = /^backup_\d{8}_\d{6}\.zip$/i
 
 export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): Plugin {
   const safeOption = (option || {}) as vitePluginDeployFtpOption
@@ -165,7 +62,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     ? safeOption.ftps || []
     : [{ ...safeOption, name: safeOption.name || safeOption.alias || safeOption.host }]
   const defaultFtp = isMultiFtp ? safeOption.defaultFtp : undefined
-  const normalizedUploadPath = normalizeUploadPath(uploadPath)
+  const normalizedUploadPath = normalizeFtpUploadPath(uploadPath)
 
   let outDir = normalizePath(path.resolve('dist'))
   let upload = false
@@ -447,6 +344,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
   const deploySingleTarget = async (ftpConfig: FtpConfig): Promise<DeployTargetResult> => {
     const { host, port = 21, user, password, alias = '', name } = ftpConfig
+    const normalizedAlias = alias ? normalizeUrlLikeBase(alias) : ''
 
     if (!host || !user || !password) {
       console.error(chalk.red(`❌ FTP配置 "${name || host || '未知'}" 缺少必需参数:`))
@@ -458,7 +356,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
     const allFiles = getAllFiles(outDir)
     const totalFiles = allFiles.length
-    const { protocol, baseUrl } = parseAlias(alias)
     const displayName = name || host
     const startTime = Date.now()
 
@@ -473,7 +370,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     console.log(`${chalk.gray('Host:')}     ${chalk.green(host)}`)
     console.log(`${chalk.gray('Source:')}   ${chalk.yellow(outDir)}`)
     console.log(`${chalk.gray('Target:')}   ${chalk.yellow(normalizedUploadPath)}`)
-    if (alias) console.log(`${chalk.gray('Alias:')}    ${chalk.green(alias)}`)
+    if (normalizedAlias) console.log(`${chalk.gray('Alias:')}    ${chalk.green(normalizedAlias)}`)
     console.log(`${chalk.gray('Files:')}    ${chalk.blue(totalFiles)}\n`)
 
     const connectConfig: FtpConnectConfig = { host, port, user, password }
@@ -492,8 +389,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           await createSingleBackup(
             preflightClient,
             normalizedUploadPath,
-            protocol,
-            baseUrl,
+            normalizedAlias,
             singleBackFiles,
             showBackFile,
           )
@@ -505,23 +401,12 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           })
 
           if (shouldBackup === '是') {
-            await createBackupFile(
-              preflightClient,
-              normalizedUploadPath,
-              protocol,
-              baseUrl,
-              showBackFile,
-            )
+            await createBackupFile(preflightClient, normalizedUploadPath, normalizedAlias, showBackFile)
           }
         }
       }
 
-      const results = await uploadFilesInBatches(
-        connectConfig,
-        allFiles,
-        normalizedUploadPath,
-        concurrency,
-      )
+      const results = await uploadFilesInBatches(connectConfig, allFiles, normalizedUploadPath, concurrency)
 
       const successCount = results.filter((r) => r.success).length
       const failedCount = results.length - successCount
@@ -550,9 +435,9 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       console.log(` ${chalk.magenta('⚡')} 平均速度: ${chalk.bold(`${formatBytes(avgSpeed)}/s`)}`)
       console.log(` ${chalk.blue('⏱')} 耗时: ${chalk.bold(duration)}s`)
 
-      if (baseUrl) {
+      if (normalizedAlias) {
         console.log(
-          ` ${chalk.green('🔗')} 访问地址: ${chalk.bold(buildUrl(protocol, baseUrl, normalizedUploadPath))}`,
+          ` ${chalk.green('🔗')} 访问地址: ${chalk.bold(resolveDisplayUrl(normalizedAlias, normalizedUploadPath))}`,
         )
       }
 
@@ -709,42 +594,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
   }
 }
 
-function getAllFiles(dirPath: string, arrayOfFiles: string[] = [], relativePath = '') {
-  const files = fs.readdirSync(dirPath)
-
-  files.forEach((file) => {
-    const fullPath = path.join(dirPath, file)
-    const relPath = path.join(relativePath, file)
-    if (fs.statSync(fullPath).isDirectory()) {
-      getAllFiles(fullPath, arrayOfFiles, relPath)
-    } else {
-      arrayOfFiles.push(normalizePath(relPath))
-    }
-  })
-
-  return arrayOfFiles
-}
-
-function validateFtpConfig(
-  config: FtpConfig,
-): config is Required<Pick<FtpConfig, 'host' | 'user' | 'password'>> & FtpConfig {
-  return !!(config.host && config.user && config.password)
-}
-
-function parseAlias(alias: string = '') {
-  const [protocol = '', baseUrl = ''] = alias.split('://')
-  return {
-    protocol: protocol ? `${protocol}://` : '',
-    baseUrl: baseUrl || '',
-  }
-}
-
-function buildUrl(protocol: string, baseUrl: string, targetPath: string) {
-  return protocol + normalizePath(baseUrl + targetPath)
-}
-
-const backupArchivePattern = /^backup_\d{8}_\d{6}\.zip$/i
-
 async function downloadRemoteFilesForBackup(
   client: Client,
   remoteDir: string,
@@ -758,7 +607,7 @@ async function downloadRemoteFilesForBackup(
   const remoteEntries = await client.list(remoteDir)
 
   for (const entry of remoteEntries) {
-    const remotePath = normalizePath(`${remoteDir}/${entry.name}`)
+    const remotePath = normalizeRemotePath(remoteDir, entry.name)
     const localPath = path.join(localDir, entry.name)
 
     if (entry.type === FileType.Directory) {
@@ -795,69 +644,14 @@ async function downloadRemoteFilesForBackup(
   return downloadedFiles
 }
 
-async function connectWithRetry(
-  client: Client,
-  config: FtpConnectConfig,
-  maxRetries: number,
-  retryDelay: number,
-  silentLogs = false,
-) {
-  let lastError: Error | undefined
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      client.ftp.verbose = false
-      await client.access({
-        ...config,
-        secure: true,
-        secureOptions: { rejectUnauthorized: false, timeout: 60000 },
-      })
-      return
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error))
-
-      if (attempt < maxRetries) {
-        if (!silentLogs) {
-          console.log(chalk.yellow(`⚠ 连接失败，${retryDelay}ms 后重试 (${attempt}/${maxRetries})`))
-        }
-        await sleep(retryDelay * attempt)
-      }
-    }
-  }
-
-  throw new Error(`❌ FTP 连接失败，已重试 ${maxRetries} 次: ${lastError?.message}`)
-}
-
-function createTempDir(basePath: string): TempDir {
-  const tempBaseDir = os.tmpdir()
-  const tempPath = path.join(tempBaseDir, 'vite-plugin-deploy-ftp', basePath)
-
-  if (!fs.existsSync(tempPath)) {
-    fs.mkdirSync(tempPath, { recursive: true })
-  }
-
-  return {
-    path: tempPath,
-    cleanup: () => {
-      try {
-        if (fs.existsSync(tempPath)) {
-          fs.rmSync(tempPath, { recursive: true, force: true })
-        }
-      } catch (error) {
-        console.warn(chalk.yellow(`⚠ 清理临时目录失败: ${tempPath}`), error)
-      }
-    },
-  }
-}
-
 async function createBackupFile(
   client: Client,
   dir: string,
-  protocol: string,
-  baseUrl: string,
+  alias: string,
   showBackFile: boolean = false,
 ) {
-  const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
+  const targetUrl = resolveDisplayUrl(alias, dir)
+  const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`==> ${targetUrl}`)}`).start()
 
   const fileName = `backup_${dayjs().format('YYYYMMDD_HHmmss')}.zip`
   const tempDir = createTempDir('backup-zip')
@@ -869,7 +663,7 @@ async function createBackupFile(
       fs.mkdirSync(zipDir, { recursive: true })
     }
 
-    backupSpinner.text = `下载远程文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`
+    backupSpinner.text = `下载远程文件中 ${chalk.yellow(`==> ${targetUrl}`)}`
 
     const downloadedFiles = await downloadRemoteFilesForBackup(client, dir, tempDir.path)
 
@@ -885,17 +679,16 @@ async function createBackupFile(
       })
     }
 
-    backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`
+    backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`==> ${targetUrl}`)}`
 
     await createZipFile(tempDir.path, zipFilePath)
 
-    backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(
-      `==> ${buildUrl(protocol, baseUrl, `${dir}/${fileName}`)}`,
-    )}`
+    const backupRemotePath = normalizeRemotePath(dir, fileName)
+    backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, backupRemotePath)}`)}`
 
-    await client.uploadFrom(zipFilePath, normalizePath(`${dir}/${fileName}`))
+    await client.uploadFrom(zipFilePath, backupRemotePath)
 
-    const backupUrl = buildUrl(protocol, baseUrl, `${dir}/${fileName}`)
+    const backupUrl = resolveDisplayUrl(alias, backupRemotePath)
 
     backupSpinner.succeed('备份完成')
     console.log(chalk.cyan('\n备份文件:'))
@@ -916,49 +709,28 @@ async function createBackupFile(
   }
 }
 
-async function createZipFile(sourceDir: string, outputPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(outputPath)
-    const zipFile = new yazl.ZipFile()
-
-    const handleError = (error: unknown) => {
-      reject(error instanceof Error ? error : new Error(String(error)))
-    }
-
-    output.on('close', resolve)
-    output.on('error', handleError)
-    zipFile.outputStream.on('error', handleError)
-
-    zipFile.outputStream.pipe(output)
-
-    for (const relativePath of getAllFiles(sourceDir)) {
-      const filePath = path.join(sourceDir, relativePath)
-      zipFile.addFile(filePath, normalizePath(relativePath))
-    }
-
-    zipFile.end()
-  })
-}
-
 async function createSingleBackup(
   client: Client,
   dir: string,
-  protocol: string,
-  baseUrl: string,
+  alias: string,
   singleBackFiles: string[],
   showBackFile: boolean = false,
 ) {
   const timestamp = dayjs().format('YYYYMMDD_HHmmss')
-  const backupSpinner = ora(`备份指定文件中 ${chalk.yellow(`==> ${buildUrl(protocol, baseUrl, dir)}`)}`).start()
+  const backupSpinner = ora(`备份指定文件中 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, dir)}`)}`).start()
 
   const tempDir = createTempDir('single-backup')
   let backupProgressSpinner: ReturnType<typeof ora> | undefined
 
   try {
     const remoteFiles = await client.list(dir)
-    const backupTasks = singleBackFiles
+    const normalizedSingleBackFiles = singleBackFiles
+      .map((fileName) => normalizeSelectionPath(fileName))
+      .filter(Boolean)
+
+    const backupTasks = normalizedSingleBackFiles
       .map((fileName) => {
-        const remoteFile = remoteFiles.find((f) => f.name === fileName)
+        const remoteFile = remoteFiles.find((file) => file.name === fileName)
         return remoteFile ? { fileName, exists: true } : { fileName, exists: false }
       })
       .filter((task) => task.exists)
@@ -992,12 +764,13 @@ async function createSingleBackup(
           const name = extIndex > -1 ? fileName.slice(0, extIndex) : fileName
           const ext = extIndex > -1 ? fileName.slice(extIndex) : ''
           const backupFileName = `${name}.${timestamp}${ext}`
-          const backupRemotePath = normalizePath(`${dir}/${backupFileName}`)
+          const sourceRemotePath = normalizeRemotePath(dir, fileName)
+          const backupRemotePath = normalizeRemotePath(dir, backupFileName)
 
-          await client.downloadTo(localTempPath, normalizePath(`${dir}/${fileName}`))
+          await client.downloadTo(localTempPath, sourceRemotePath)
           await client.uploadFrom(localTempPath, backupRemotePath)
 
-          backedUpFiles.push(buildUrl(protocol, baseUrl, backupRemotePath))
+          backedUpFiles.push(resolveDisplayUrl(alias, backupRemotePath))
           return true
         } catch (error) {
           console.warn(chalk.yellow(`备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
