@@ -21,7 +21,7 @@ import type {
 } from './types'
 import { createTempDir, createZipFile, getAllFiles } from './utils/file'
 import { connectWithRetry, sleep, validateFtpConfig } from './utils/ftp'
-import { getLogSymbol, renderInlineStats, renderPanel, truncateTerminalText } from './utils/output'
+import { getLogSymbol, getPanelDot, renderInlineStats, renderPanel, truncateTerminalText } from './utils/output'
 import {
   normalizeFtpUploadPath,
   normalizeRemotePath,
@@ -92,7 +92,7 @@ const renderBackupPanel = (summary: BackupSummary): string => {
     })
   }
 
-  return renderPanel(`${getLogSymbol('success')} ${summary.title}`, rows, 'success')
+  return renderPanel(`${getPanelDot('success')} ${summary.title}`, rows, 'success')
 }
 
 const renderDebugPanel = (entries: DebugTimingEntry[]): string => {
@@ -105,7 +105,7 @@ const renderDebugPanel = (entries: DebugTimingEntry[]): string => {
     ),
   }))
 
-  return renderPanel('调试耗时', rows, 'info')
+  return renderPanel(`${getPanelDot('success')} 调试耗时`, rows, 'info')
 }
 
 export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): Plugin {
@@ -676,7 +676,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     clearScreen()
     console.log(
       renderPanel(
-        '准备部署',
+        `${getPanelDot('success')} 准备部署`,
         [
           {
             label: '位置:',
@@ -850,7 +850,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
       console.log(
         renderPanel(
-          failedCount === 0 ? `${getLogSymbol('success')} 部署完成` : `${getLogSymbol('warning')} 部署完成`,
+          failedCount === 0 ? `${getPanelDot('success')} 部署完成` : `${getPanelDot('warning')} 部署完成`,
           resultRows,
           failedCount === 0 ? 'success' : 'warning',
         ),

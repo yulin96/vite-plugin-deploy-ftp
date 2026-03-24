@@ -61,6 +61,19 @@ export const renderPanel = (title: string, rows: TerminalRow[], tone: PanelTone 
 export const renderInlineStats = (items: Array<string | false | null | undefined>): string =>
   items.filter(Boolean).join(chalk.gray(' · '))
 
+export const getPanelDot = (tone: Exclude<PanelTone, 'danger'> | 'danger' = 'success'): string => {
+  switch (tone) {
+    case 'info':
+      return chalk.green('●')
+    case 'success':
+      return chalk.green('●')
+    case 'warning':
+      return chalk.yellow('●')
+    case 'danger':
+      return chalk.red('●')
+  }
+}
+
 export const getLogSymbol = (tone: Exclude<PanelTone, 'info'>): string => {
   switch (tone) {
     case 'success':
