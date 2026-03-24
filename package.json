@@ -38,6 +38,7 @@
   "license": "MIT",
   "description": "将dist目录下的文件上传到ftp服务器",
   "devDependencies": {
+    "@types/cli-progress": "^3.11.6",
     "@types/node": "^22.15.32",
     "@types/yazl": "^3.3.0",
     "tsup": "^8.5.0",
@@ -50,8 +51,12 @@
     "@inquirer/prompts": "^7.5.3",
     "basic-ftp": "^5.0.5",
     "chalk": "^5.4.1",
+    "cli-progress": "^3.12.0",
+    "cli-truncate": "^5.2.0",
     "dayjs": "^1.11.13",
+    "log-symbols": "^7.0.1",
     "ora": "^8.2.0",
+    "string-width": "^8.2.0",
     "yazl": "^3.3.1"
   }
 }

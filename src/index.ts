@@ -1,6 +1,7 @@
 import { checkbox, select } from '@inquirer/prompts'
 import { Client, FileType } from 'basic-ftp'
 import chalk from 'chalk'
+import cliProgress from 'cli-progress'
 import dayjs from 'dayjs'
 import fs from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -9,6 +10,7 @@ import path from 'node:path'
 import ora from 'ora'
 import { normalizePath, Plugin, type ResolvedConfig } from 'vite'
 import type {
+  BackupSummary,
   DeployTargetResult,
   FtpConfig,
   FtpConnectConfig,
@@ -25,7 +27,8 @@ import {
   normalizeUrlLikeBase,
   resolveDisplayUrl,
 } from './utils/path'
-import { buildCapsuleBar, formatBytes, formatDuration, trimMiddle } from './utils/progress'
+import { getLogSymbol, renderInlineStats, renderPanel, truncateTerminalText } from './utils/output'
+import { formatBytes, formatDuration } from './utils/progress'
 
 export type {
   BaseOption,
@@ -36,10 +39,31 @@ export type {
   UploadResult,
   UploadTask,
   ValidFtpConfig,
+  BackupSummary,
   vitePluginDeployFtpOption,
 } from './types'
 
 const backupArchivePattern = /^backup_\d{8}_\d{6}\.zip$/i
+
+const renderBackupPanel = (summary: BackupSummary): string => {
+  const previewItems = summary.items.slice(0, 2)
+  const rows = [
+    { label: '结果:', value: chalk.green(`${summary.items.length} 个备份文件`) },
+    ...previewItems.map((item, index) => ({
+      label: `文件 ${index + 1}:`,
+      value: chalk.cyan(truncateTerminalText(item, 22)),
+    })),
+  ]
+
+  if (summary.items.length > previewItems.length) {
+    rows.push({
+      label: '其余:',
+      value: chalk.gray(`还有 ${summary.items.length - previewItems.length} 个备份项未展开`),
+    })
+  }
+
+  return renderPanel(`${getLogSymbol('success')} ${summary.title}`, rows, 'success')
+}
 
 export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): Plugin {
   const safeOption = (option || {}) as vitePluginDeployFtpOption
@@ -229,47 +253,59 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const totalBytes = tasks.reduce((sum, task) => sum + task.size, 0)
     const startAt = Date.now()
     const safeWindowSize = Math.max(1, Math.min(windowSize, tasks.length || 1))
-    const activeFiles = new Set<string>()
     const silentLogs = Boolean(useInteractiveOutput)
-
-    const spinner = useInteractiveOutput ? ora({ text: '准备上传...', spinner: 'dots12' }).start() : null
-    const reportEvery = Math.max(1, Math.ceil(totalFiles / 10))
+    const progressBar =
+      useInteractiveOutput
+        ? new cliProgress.SingleBar({
+            hideCursor: true,
+            clearOnComplete: true,
+            stopOnComplete: true,
+            barsize: 18,
+            barCompleteChar: '█',
+            barIncompleteChar: '░',
+            format: `${chalk.gray('上传')} ${chalk.bold('{percentage}%')} ${chalk.cyan('{bar}')} ${chalk.gray('·')} ${chalk.magenta('{speed}/s')} ${chalk.gray('·')} ${chalk.gray('{elapsed}')}s`,
+          })
+        : null
+    const reportEvery = Math.max(1, Math.ceil(totalFiles / 6))
     let lastReportedCompleted = -1
 
+    if (progressBar) {
+      progressBar.start(totalFiles, 0, {
+        speed: formatBytes(0),
+        elapsed: '0',
+      })
+    }
+
     const updateProgress = () => {
-      const progressRatio = totalFiles > 0 ? completed / totalFiles : 1
-      const percentage = Math.round(progressRatio * 100)
       const elapsedSeconds = (Date.now() - startAt) / 1000
       const speed = elapsedSeconds > 0 ? uploadedBytes / elapsedSeconds : 0
-      const etaSeconds = speed > 0 ? Math.max(0, (totalBytes - uploadedBytes) / speed) : 0
-      const activeList = Array.from(activeFiles)
-      const currentFile = activeList.length > 0 ? trimMiddle(activeList[activeList.length - 1], 86) : '-'
-
-      if (!spinner) {
+      
+      if (!progressBar) {
+        const progressRatio = totalFiles > 0 ? completed / totalFiles : 1
+        const percentage = Math.round(progressRatio * 100)
+        if (completed === 0 && totalFiles > 0) return
         if (completed === lastReportedCompleted) return
         if (completed === totalFiles || completed % reportEvery === 0) {
           console.log(
-            `${chalk.gray('进度:')} ${completed}/${totalFiles} (${percentage}%) | ${chalk.gray('数据:')} ${formatBytes(uploadedBytes)}/${formatBytes(totalBytes)} | ${chalk.gray('速度:')} ${formatBytes(speed)}/s`,
+            `${chalk.gray('上传进度')} ${renderInlineStats([
+              chalk.bold(`${completed}/${totalFiles}`),
+              `${percentage}%`,
+              `${formatBytes(uploadedBytes)}/${formatBytes(totalBytes)}`,
+              `${formatBytes(speed)}/s`,
+            ])}`,
           )
           lastReportedCompleted = completed
         }
         return
       }
 
-      const bar = buildCapsuleBar(progressRatio)
-      const warnLine =
-        retries > 0 || failed > 0
-          ? `\n${chalk.yellow('重试')}: ${retries}  ${chalk.yellow('失败')}: ${failed}`
-          : ''
-
-      spinner.text = [
-        `${chalk.cyan('正在上传:')} ${chalk.white(currentFile)}`,
-        `${bar} ${chalk.bold(`${percentage}%`)} ${chalk.gray(`(${completed}/${totalFiles})`)} ${chalk.gray('|')} ${chalk.blue(formatBytes(uploadedBytes))}/${chalk.blue(formatBytes(totalBytes))} ${chalk.gray('|')} ${chalk.magenta(`${formatBytes(speed)}/s`)} ${chalk.gray('|')} 预计 ${chalk.yellow(formatDuration(etaSeconds))}`,
-      ].join('\n')
-      spinner.text += warnLine
+      progressBar.update(completed, {
+        speed: chalk.magenta(formatBytes(speed)),
+        elapsed: formatDuration(elapsedSeconds).replace(/s$/, ''),
+      })
     }
 
-    const refreshTimer = spinner ? setInterval(updateProgress, 120) : null
+    const refreshTimer = progressBar ? setInterval(updateProgress, 120) : null
     let currentIndex = 0
 
     const worker = async () => {
@@ -292,7 +328,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           if (index >= tasks.length) return
 
           const task = tasks[index]
-          activeFiles.add(task.remotePath)
           updateProgress()
 
           const result = await uploadFileWithRetry(task, {
@@ -312,7 +347,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
             failed++
           }
           results.push(result)
-          activeFiles.delete(task.remotePath)
           updateProgress()
         }
       } finally {
@@ -328,15 +362,16 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       if (refreshTimer) clearInterval(refreshTimer)
     }
 
-    if (spinner) {
+    if (progressBar) {
       const elapsedSeconds = (Date.now() - startAt) / 1000
-      const successCount = results.filter((item) => item.success).length
       const speed = elapsedSeconds > 0 ? uploadedBytes / elapsedSeconds : 0
-      spinner.succeed(
-        `${chalk.green('上传成功')} ${successCount} 个文件。\n${buildCapsuleBar(1)} 100% (${totalFiles}/${totalFiles}) ${chalk.gray('|')} 速度 ${chalk.magenta(`${formatBytes(speed)}/s`)} ${chalk.gray('|')} 耗时 ${chalk.yellow(formatDuration(elapsedSeconds))}`,
-      )
+      progressBar.update(totalFiles, {
+        speed: chalk.magenta(formatBytes(speed)),
+        elapsed: formatDuration(elapsedSeconds).replace(/s$/, ''),
+      })
+      progressBar.stop()
     } else {
-      console.log(`${chalk.green('✔')} 所有文件上传完成 (${totalFiles}/${totalFiles})`)
+      console.log(`${getLogSymbol('success')} 所有文件上传完成 (${totalFiles}/${totalFiles})`)
     }
 
     return results
@@ -360,18 +395,36 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const startTime = Date.now()
 
     if (allFiles.length === 0) {
-      console.log(`${chalk.yellow('⚠ 没有找到需要上传的文件')}`)
+      console.log(`${getLogSymbol('warning')} 没有找到需要上传的文件`)
       return { name: displayName, totalFiles: 0, failedCount: 0 }
     }
 
     clearScreen()
-    console.log(chalk.cyan(`\n🚀 FTP 部署开始\n`))
-    console.log(`${chalk.gray('Server:')}   ${chalk.green(displayName)}`)
-    console.log(`${chalk.gray('Host:')}     ${chalk.green(host)}`)
-    console.log(`${chalk.gray('Source:')}   ${chalk.yellow(outDir)}`)
-    console.log(`${chalk.gray('Target:')}   ${chalk.yellow(normalizedUploadPath)}`)
-    if (normalizedAlias) console.log(`${chalk.gray('Alias:')}    ${chalk.green(normalizedAlias)}`)
-    console.log(`${chalk.gray('Files:')}    ${chalk.blue(totalFiles)}\n`)
+    console.log(
+      renderPanel(
+        '准备部署',
+        [
+          {
+            label: '位置:',
+            value: chalk.green(`${displayName} · ${port === 21 ? host : `${host}:${port}`}`),
+          },
+          {
+            label: '目标:',
+            value: chalk.yellow(
+              truncateTerminalText(
+                normalizedAlias ? `${normalizedUploadPath} · ${normalizedAlias}` : normalizedUploadPath,
+                18,
+              ),
+            ),
+          },
+          {
+            label: '文件:',
+            value: chalk.blue(`${totalFiles} 个 · ${truncateTerminalText(outDir, 30)}`),
+          },
+        ],
+        'info',
+      ),
+    )
 
     const connectConfig: FtpConnectConfig = { host, port, user, password }
     const preflightClient = new Client()
@@ -379,19 +432,21 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
     try {
       await connectWithRetry(preflightClient, connectConfig, maxRetries, retryDelay, Boolean(preflightSpinner))
-      if (preflightSpinner) preflightSpinner.succeed('连接成功')
+      if (preflightSpinner) preflightSpinner.stop()
 
       await preflightClient.ensureDir(normalizedUploadPath)
       const fileList = await preflightClient.list()
+      let backupSummary: BackupSummary | null = null
 
       if (fileList.length) {
         if (singleBack) {
-          await createSingleBackup(
+          backupSummary = await createSingleBackup(
             preflightClient,
             normalizedUploadPath,
             normalizedAlias,
             singleBackFiles,
             showBackFile,
+            useInteractiveOutput,
           )
         } else {
           const shouldBackup = await select({
@@ -401,9 +456,19 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
           })
 
           if (shouldBackup === '是') {
-            await createBackupFile(preflightClient, normalizedUploadPath, normalizedAlias, showBackFile)
+            backupSummary = await createBackupFile(
+              preflightClient,
+              normalizedUploadPath,
+              normalizedAlias,
+              showBackFile,
+              useInteractiveOutput,
+            )
           }
         }
+      }
+
+      if (backupSummary) {
+        console.log(renderBackupPanel(backupSummary))
       }
 
       const results = await uploadFilesInBatches(connectConfig, allFiles, normalizedUploadPath, concurrency)
@@ -411,58 +476,65 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       const successCount = results.filter((r) => r.success).length
       const failedCount = results.length - successCount
       const durationSeconds = (Date.now() - startTime) / 1000
-      const duration = durationSeconds.toFixed(2)
       const uploadedBytes = results.reduce((sum, result) => (result.success ? sum + result.size : sum), 0)
       const retryCount = results.reduce((sum, result) => sum + result.retries, 0)
       const avgSpeed = durationSeconds > 0 ? uploadedBytes / durationSeconds : 0
+      const accessUrl = normalizedAlias ? resolveDisplayUrl(normalizedAlias, normalizedUploadPath) : ''
 
       clearScreen()
-      console.log('\n' + chalk.gray('─'.repeat(40)) + '\n')
-
-      if (failedCount === 0) {
-        console.log(`${chalk.green('🎉 部署成功!')}`)
-      } else {
-        console.log(`${chalk.yellow('⚠ 部署完成但存在错误')}`)
+      const resultRows = [
+        {
+          label: '结果:',
+          value:
+            failedCount === 0
+              ? chalk.green(`${successCount}/${results.length} 全部成功`)
+              : chalk.yellow(`成功 ${successCount} 个，失败 ${failedCount} 个`),
+        },
+        {
+          label: '统计:',
+          value: renderInlineStats([
+            `${retryCount} 次重试`,
+            formatBytes(uploadedBytes),
+            `${formatBytes(avgSpeed)}/s`,
+            formatDuration(durationSeconds),
+          ]),
+        },
+      ]
+      if (accessUrl) {
+        resultRows.push({ label: '访问:', value: chalk.cyan(truncateTerminalText(accessUrl, 20)) })
       }
 
-      console.log(`\n${chalk.gray('统计:')}`)
-      console.log(` ${chalk.green('✔')} 成功: ${chalk.bold(successCount)}`)
       if (failedCount > 0) {
-        console.log(` ${chalk.red('✗')} 失败: ${chalk.bold(failedCount)}`)
-      }
-      console.log(` ${chalk.cyan('⇄')} 重试: ${chalk.bold(retryCount)}`)
-      console.log(` ${chalk.blue('📦')} 数据: ${chalk.bold(formatBytes(uploadedBytes))}`)
-      console.log(` ${chalk.magenta('⚡')} 平均速度: ${chalk.bold(`${formatBytes(avgSpeed)}/s`)}`)
-      console.log(` ${chalk.blue('⏱')} 耗时: ${chalk.bold(duration)}s`)
-
-      if (normalizedAlias) {
-        console.log(
-          ` ${chalk.green('🔗')} 访问地址: ${chalk.bold(resolveDisplayUrl(normalizedAlias, normalizedUploadPath))}`,
+        const failedItems = results.filter((result) => !result.success).slice(0, 2)
+        resultRows.push(
+          ...failedItems.map((item, index) => ({
+            label: `失败 ${index + 1}:`,
+            value: chalk.red(
+              `${truncateTerminalText(item.name, 26)} · ${truncateTerminalText(item.error?.message || 'unknown error', 22)}`,
+            ),
+          })),
         )
+        if (failedCount > failedItems.length) {
+          resultRows.push({
+            label: '其余:',
+            value: chalk.gray(`还有 ${failedCount - failedItems.length} 个失败项未展开`),
+          })
+        }
       }
 
-      console.log('')
-
-      if (failedCount > 0) {
-        const failedItems = results.filter((result) => !result.success)
-        const previewCount = Math.min(5, failedItems.length)
-        console.log(chalk.red('失败明细:'))
-        for (let i = 0; i < previewCount; i++) {
-          const item = failedItems[i]
-          const reason = item.error?.message || 'unknown error'
-          console.log(` ${chalk.red('•')} ${item.name} => ${reason}`)
-        }
-        if (failedItems.length > previewCount) {
-          console.log(chalk.gray(` ... 还有 ${failedItems.length - previewCount} 个失败文件`))
-        }
-        console.log('')
-      }
+      console.log(
+        renderPanel(
+          failedCount === 0 ? `${getLogSymbol('success')} 部署完成` : `${getLogSymbol('warning')} 部署完成`,
+          resultRows,
+          failedCount === 0 ? 'success' : 'warning',
+        ),
+      )
 
       return { name: displayName, totalFiles: results.length, failedCount }
     } catch (error) {
-      if (preflightSpinner) preflightSpinner.fail(`❌ 上传到 ${displayName} 失败`)
+      if (preflightSpinner) preflightSpinner.stop()
 
-      console.log(`\n${chalk.red('❌ 上传过程中发生错误:')} ${error}\n`)
+      console.log(`\n${getLogSymbol('danger')} 上传过程中发生错误: ${error}\n`)
       return {
         name: displayName,
         totalFiles,
@@ -649,9 +721,10 @@ async function createBackupFile(
   dir: string,
   alias: string,
   showBackFile: boolean = false,
-) {
+  useSpinner: boolean = true,
+): Promise<BackupSummary | null> {
   const targetUrl = resolveDisplayUrl(alias, dir)
-  const backupSpinner = ora(`创建备份文件中 ${chalk.yellow(`==> ${targetUrl}`)}`).start()
+  const backupSpinner = useSpinner ? ora(`创建备份文件中 ${chalk.yellow(`==> ${targetUrl}`)}`).start() : null
 
   const fileName = `backup_${dayjs().format('YYYYMMDD_HHmmss')}.zip`
   const tempDir = createTempDir('backup-zip')
@@ -663,13 +736,17 @@ async function createBackupFile(
       fs.mkdirSync(zipDir, { recursive: true })
     }
 
-    backupSpinner.text = `下载远程文件中 ${chalk.yellow(`==> ${targetUrl}`)}`
+    if (backupSpinner) {
+      backupSpinner.text = `下载远程文件中 ${chalk.yellow(`==> ${targetUrl}`)}`
+    }
 
     const downloadedFiles = await downloadRemoteFilesForBackup(client, dir, tempDir.path)
 
     if (downloadedFiles.length === 0) {
-      backupSpinner.warn('未找到可备份的远程文件')
-      return
+      if (backupSpinner) {
+        backupSpinner.warn('未找到可备份的远程文件')
+      }
+      return null
     }
 
     if (showBackFile) {
@@ -679,23 +756,30 @@ async function createBackupFile(
       })
     }
 
-    backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`==> ${targetUrl}`)}`
+    if (backupSpinner) {
+      backupSpinner.text = `下载远程文件成功 ${chalk.yellow(`==> ${targetUrl}`)}`
+    }
 
     await createZipFile(tempDir.path, zipFilePath)
 
     const backupRemotePath = normalizeRemotePath(dir, fileName)
-    backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, backupRemotePath)}`)}`
+    if (backupSpinner) {
+      backupSpinner.text = `压缩完成, 准备上传 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, backupRemotePath)}`)}`
+    }
 
     await client.uploadFrom(zipFilePath, backupRemotePath)
 
     const backupUrl = resolveDisplayUrl(alias, backupRemotePath)
 
-    backupSpinner.succeed('备份完成')
-    console.log(chalk.cyan('\n备份文件:'))
-    console.log(chalk.green(`${backupUrl}`))
-    console.log()
+    backupSpinner?.stop()
+    return {
+      title: '备份完成',
+      items: [backupUrl],
+    }
   } catch (error) {
-    backupSpinner.fail('备份失败')
+    if (backupSpinner) {
+      backupSpinner.fail('备份失败')
+    }
     throw error
   } finally {
     tempDir.cleanup()
@@ -715,9 +799,12 @@ async function createSingleBackup(
   alias: string,
   singleBackFiles: string[],
   showBackFile: boolean = false,
-) {
+  useSpinner: boolean = true,
+): Promise<BackupSummary | null> {
   const timestamp = dayjs().format('YYYYMMDD_HHmmss')
-  const backupSpinner = ora(`备份指定文件中 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, dir)}`)}`).start()
+  const backupSpinner = useSpinner
+    ? ora(`备份指定文件中 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, dir)}`)}`).start()
+    : null
 
   const tempDir = createTempDir('single-backup')
   let backupProgressSpinner: ReturnType<typeof ora> | undefined
@@ -736,11 +823,13 @@ async function createSingleBackup(
       .filter((task) => task.exists)
 
     if (backupTasks.length === 0) {
-      backupSpinner.warn('未找到需要备份的文件')
-      return
+      if (backupSpinner) {
+        backupSpinner.warn('未找到需要备份的文件')
+      }
+      return null
     }
 
-    backupSpinner.stop()
+    backupSpinner?.stop()
 
     if (showBackFile) {
       console.log(chalk.cyan(`\n开始单文件备份，共 ${backupTasks.length} 个文件:`))
@@ -749,7 +838,9 @@ async function createSingleBackup(
       })
     }
 
-    backupProgressSpinner = ora('正在备份文件...').start()
+    if (useSpinner) {
+      backupProgressSpinner = ora('正在备份文件...').start()
+    }
 
     const concurrencyLimit = 3
     let backedUpCount = 0
@@ -783,19 +874,21 @@ async function createSingleBackup(
     }
 
     if (backedUpCount > 0) {
-      backupProgressSpinner.succeed('备份完成')
-      console.log(chalk.cyan('\n备份文件:'))
-      backedUpFiles.forEach((url) => {
-        console.log(chalk.green(`🔗  ${url}`))
-      })
-      console.log()
+      backupProgressSpinner?.stop()
+      return {
+        title: '备份完成',
+        items: backedUpFiles,
+      }
     } else {
-      backupProgressSpinner.fail('所有文件备份失败')
+      if (backupProgressSpinner) {
+        backupProgressSpinner.fail('所有文件备份失败')
+      }
+      return null
     }
   } catch (error) {
     if (backupProgressSpinner) {
       backupProgressSpinner.fail('备份过程中发生错误')
-    } else {
+    } else if (backupSpinner) {
       backupSpinner.fail('备份过程中发生错误')
     }
     throw error

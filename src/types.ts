@@ -63,3 +63,8 @@ export interface DeployTargetResult {
 }
 
 export type ValidFtpConfig = Required<Pick<FtpConfig, 'host' | 'user' | 'password'>> & FtpConfig
+
+export interface BackupSummary {
+  title: string
+  items: string[]
+}
