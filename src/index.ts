@@ -19,8 +19,9 @@ import type {
   UploadTaskGroup,
   vitePluginDeployFtpOption,
 } from './types'
-import { connectWithRetry, sleep, validateFtpConfig } from './utils/ftp'
 import { createTempDir, createZipFile, getAllFiles } from './utils/file'
+import { connectWithRetry, sleep, validateFtpConfig } from './utils/ftp'
+import { getLogSymbol, renderInlineStats, renderPanel, truncateTerminalText } from './utils/output'
 import {
   normalizeFtpUploadPath,
   normalizeRemotePath,
@@ -28,10 +29,10 @@ import {
   normalizeUrlLikeBase,
   resolveDisplayUrl,
 } from './utils/path'
-import { getLogSymbol, renderInlineStats, renderPanel, truncateTerminalText } from './utils/output'
 import { formatBytes, formatDuration } from './utils/progress'
 
 export type {
+  BackupSummary,
   BaseOption,
   DeployTargetResult,
   FtpConfig,
@@ -41,7 +42,6 @@ export type {
   UploadTask,
   UploadTaskGroup,
   ValidFtpConfig,
-  BackupSummary,
   vitePluginDeployFtpOption,
 } from './types'
 
@@ -80,12 +80,13 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     autoUpload = false,
     fancy = true,
     failOnError = true,
-    concurrency = 1,
+    concurrency = 3,
   } = safeOption
 
   const isMultiFtp = 'ftps' in safeOption
-  const ftpConfigs: FtpConfig[] = isMultiFtp
-    ? safeOption.ftps || []
+  const ftpConfigs: FtpConfig[] =
+    isMultiFtp ?
+      safeOption.ftps || []
     : [{ ...safeOption, name: safeOption.name || safeOption.alias || safeOption.host }]
   const defaultFtp = isMultiFtp ? safeOption.defaultFtp : undefined
   const normalizedUploadPath = normalizeFtpUploadPath(uploadPath)
@@ -189,9 +190,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         }
 
         if (!context.silentLogs) {
-          console.log(
-            `${chalk.yellow('⚠')} ${task.filePath} 上传失败，正在重试 (${attempt}/${context.maxRetries})...`,
-          )
+          console.log(`${chalk.yellow('⚠')} ${task.filePath} 上传失败，正在重试 (${attempt}/${context.maxRetries})...`)
         }
         await sleep(context.retryDelay * attempt)
       }
@@ -260,9 +259,9 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       const remoteDir = normalizePath(path.posix.dirname(task.remotePath))
       const normalizedRemoteDir = remoteDir && remoteDir !== '.' ? remoteDir : normalizedTargetDir
       const relativeDir =
-        normalizedRemoteDir === normalizedTargetDir
-          ? ''
-          : normalizedRemoteDir.slice(normalizedTargetDir.length).replace(/^\/+/, '')
+        normalizedRemoteDir === normalizedTargetDir ? '' : (
+          normalizedRemoteDir.slice(normalizedTargetDir.length).replace(/^\/+/, '')
+        )
       const currentTasks = groupsByRelativeDir.get(relativeDir)
       if (currentTasks) {
         currentTasks.push(task)
@@ -283,17 +282,17 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const safeWindowSize = Math.max(1, Math.min(windowSize, taskGroups.length || 1))
     const silentLogs = Boolean(useInteractiveOutput)
     const progressBar =
-      useInteractiveOutput
-        ? new cliProgress.SingleBar({
-            hideCursor: true,
-            clearOnComplete: true,
-            stopOnComplete: true,
-            barsize: 18,
-            barCompleteChar: '█',
-            barIncompleteChar: '░',
-            format: `${chalk.gray('上传')} ${chalk.bold('{percentage}%')} ${chalk.cyan('{bar}')} ${chalk.gray('·')} ${chalk.magenta('{speed}/s')} ${chalk.gray('·')} ${chalk.gray('{elapsed}')}s`,
-          })
-        : null
+      useInteractiveOutput ?
+        new cliProgress.SingleBar({
+          hideCursor: true,
+          clearOnComplete: true,
+          stopOnComplete: true,
+          barsize: 18,
+          barCompleteChar: '█',
+          barIncompleteChar: '░',
+          format: `${chalk.gray('上传')} ${chalk.bold('{percentage}%')} ${chalk.cyan('{bar}')} ${chalk.gray('·')} ${chalk.magenta('{speed}/s')} ${chalk.gray('·')} ${chalk.gray('{elapsed}')}s`,
+        })
+      : null
     const reportEvery = Math.max(1, Math.ceil(totalFiles / 6))
     let lastReportedCompleted = -1
 
@@ -307,7 +306,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const updateProgress = () => {
       const elapsedSeconds = (Date.now() - startAt) / 1000
       const speed = elapsedSeconds > 0 ? uploadedBytes / elapsedSeconds : 0
-      
+
       if (!progressBar) {
         const progressRatio = totalFiles > 0 ? completed / totalFiles : 1
         const percentage = Math.round(progressRatio * 100)
@@ -556,9 +555,9 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         {
           label: '结果:',
           value:
-            failedCount === 0
-              ? chalk.green(`${successCount}/${results.length} 全部成功`)
-              : chalk.yellow(`成功 ${successCount} 个，失败 ${failedCount} 个`),
+            failedCount === 0 ?
+              chalk.green(`${successCount}/${results.length} 全部成功`)
+            : chalk.yellow(`成功 ${successCount} 个，失败 ${failedCount} 个`),
         },
         {
           label: '统计:',
@@ -872,9 +871,8 @@ async function createSingleBackup(
   useSpinner: boolean = true,
 ): Promise<BackupSummary | null> {
   const timestamp = dayjs().format('YYYYMMDD_HHmmss')
-  const backupSpinner = useSpinner
-    ? ora(`备份指定文件中 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, dir)}`)}`).start()
-    : null
+  const backupSpinner =
+    useSpinner ? ora(`备份指定文件中 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, dir)}`)}`).start() : null
 
   const tempDir = createTempDir('single-backup')
   let backupProgressSpinner: ReturnType<typeof ora> | undefined
