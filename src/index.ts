@@ -84,9 +84,8 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
   } = safeOption
 
   const isMultiFtp = 'ftps' in safeOption
-  const ftpConfigs: FtpConfig[] =
-    isMultiFtp ?
-      safeOption.ftps || []
+  const ftpConfigs: FtpConfig[] = isMultiFtp
+    ? safeOption.ftps || []
     : [{ ...safeOption, name: safeOption.name || safeOption.alias || safeOption.host }]
   const defaultFtp = isMultiFtp ? safeOption.defaultFtp : undefined
   const normalizedUploadPath = normalizeFtpUploadPath(uploadPath)
@@ -259,9 +258,9 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       const remoteDir = normalizePath(path.posix.dirname(task.remotePath))
       const normalizedRemoteDir = remoteDir && remoteDir !== '.' ? remoteDir : normalizedTargetDir
       const relativeDir =
-        normalizedRemoteDir === normalizedTargetDir ? '' : (
-          normalizedRemoteDir.slice(normalizedTargetDir.length).replace(/^\/+/, '')
-        )
+        normalizedRemoteDir === normalizedTargetDir
+          ? ''
+          : normalizedRemoteDir.slice(normalizedTargetDir.length).replace(/^\/+/, '')
       const currentTasks = groupsByRelativeDir.get(relativeDir)
       if (currentTasks) {
         currentTasks.push(task)
@@ -281,9 +280,8 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const startAt = Date.now()
     const safeWindowSize = Math.max(1, Math.min(windowSize, taskGroups.length || 1))
     const silentLogs = Boolean(useInteractiveOutput)
-    const progressBar =
-      useInteractiveOutput ?
-        new cliProgress.SingleBar({
+    const progressBar = useInteractiveOutput
+      ? new cliProgress.SingleBar({
           hideCursor: true,
           clearOnComplete: true,
           stopOnComplete: true,
@@ -555,9 +553,9 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         {
           label: '结果:',
           value:
-            failedCount === 0 ?
-              chalk.green(`${successCount}/${results.length} 全部成功`)
-            : chalk.yellow(`成功 ${successCount} 个，失败 ${failedCount} 个`),
+            failedCount === 0
+              ? chalk.green(`${successCount}/${results.length} 全部成功`)
+              : chalk.yellow(`成功 ${successCount} 个，失败 ${failedCount} 个`),
         },
         {
           label: '统计:',
@@ -871,8 +869,9 @@ async function createSingleBackup(
   useSpinner: boolean = true,
 ): Promise<BackupSummary | null> {
   const timestamp = dayjs().format('YYYYMMDD_HHmmss')
-  const backupSpinner =
-    useSpinner ? ora(`备份指定文件中 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, dir)}`)}`).start() : null
+  const backupSpinner = useSpinner
+    ? ora(`备份指定文件中 ${chalk.yellow(`==> ${resolveDisplayUrl(alias, dir)}`)}`).start()
+    : null
 
   const tempDir = createTempDir('single-backup')
   let backupProgressSpinner: ReturnType<typeof ora> | undefined

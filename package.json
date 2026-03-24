@@ -21,6 +21,8 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc -p tsconfig.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "pack": "pnpm run build && pnpm pack",
     "build:test": "cd playground && vite build",
     "build:test:deploy": "cd playground && vite build --mode deploy"
@@ -41,6 +43,7 @@
     "@types/cli-progress": "^3.11.6",
     "@types/node": "^22.15.32",
     "@types/yazl": "^3.3.0",
+    "prettier": "3.8.1",
     "tsup": "^8.5.0",
     "typescript": "^5.8.3"
   },
