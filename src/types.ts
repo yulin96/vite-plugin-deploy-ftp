@@ -48,6 +48,12 @@ export interface UploadTask {
   size: number
 }
 
+export interface UploadTaskGroup {
+  relativeDir: string
+  remoteDir: string
+  tasks: UploadTask[]
+}
+
 export interface FtpConnectConfig {
   host: string
   port: number

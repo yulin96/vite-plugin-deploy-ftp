@@ -16,6 +16,7 @@ import type {
   FtpConnectConfig,
   UploadResult,
   UploadTask,
+  UploadTaskGroup,
   vitePluginDeployFtpOption,
 } from './types'
 import { connectWithRetry, sleep, validateFtpConfig } from './utils/ftp'
@@ -38,6 +39,7 @@ export type {
   TempDir,
   UploadResult,
   UploadTask,
+  UploadTaskGroup,
   ValidFtpConfig,
   BackupSummary,
   vitePluginDeployFtpOption,
@@ -137,6 +139,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     context: {
       client: Client
       ensureConnected: () => Promise<void>
+      ensureRemoteDir: (remoteDir: string) => Promise<void>
       markDisconnected: () => void
       silentLogs: boolean
       maxRetries: number
@@ -149,7 +152,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
         const remoteDir = normalizePath(path.posix.dirname(task.remotePath))
         if (remoteDir && remoteDir !== '.') {
-          await context.client.ensureDir(remoteDir)
+          await context.ensureRemoteDir(remoteDir)
         }
 
         await context.client.uploadFrom(task.filePath, path.posix.basename(task.remotePath))
@@ -213,6 +216,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const results: UploadResult[] = []
     const totalFiles = files.length
     const tasks: UploadTask[] = []
+    const taskGroups: UploadTaskGroup[] = []
 
     let completed = 0
     let failed = 0
@@ -250,9 +254,33 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       }
     }
 
+    const normalizedTargetDir = normalizeFtpUploadPath(targetDir)
+    const groupsByRelativeDir = new Map<string, UploadTask[]>()
+    for (const task of tasks) {
+      const remoteDir = normalizePath(path.posix.dirname(task.remotePath))
+      const normalizedRemoteDir = remoteDir && remoteDir !== '.' ? remoteDir : normalizedTargetDir
+      const relativeDir =
+        normalizedRemoteDir === normalizedTargetDir
+          ? ''
+          : normalizedRemoteDir.slice(normalizedTargetDir.length).replace(/^\/+/, '')
+      const currentTasks = groupsByRelativeDir.get(relativeDir)
+      if (currentTasks) {
+        currentTasks.push(task)
+      } else {
+        groupsByRelativeDir.set(relativeDir, [task])
+      }
+    }
+
+    for (const [relativeDir, groupedTasks] of groupsByRelativeDir) {
+      const remoteDir = relativeDir ? normalizeRemotePath(normalizedTargetDir, relativeDir) : normalizedTargetDir
+      taskGroups.push({ relativeDir, remoteDir, tasks: groupedTasks })
+    }
+
+    taskGroups.sort((left, right) => left.remoteDir.localeCompare(right.remoteDir))
+
     const totalBytes = tasks.reduce((sum, task) => sum + task.size, 0)
     const startAt = Date.now()
-    const safeWindowSize = Math.max(1, Math.min(windowSize, tasks.length || 1))
+    const safeWindowSize = Math.max(1, Math.min(windowSize, taskGroups.length || 1))
     const silentLogs = Boolean(useInteractiveOutput)
     const progressBar =
       useInteractiveOutput
@@ -306,48 +334,90 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     }
 
     const refreshTimer = progressBar ? setInterval(updateProgress, 120) : null
-    let currentIndex = 0
+    let currentGroupIndex = 0
 
     const worker = async () => {
       const client = new Client()
       let connected = false
+      let currentRelativeDir = ''
+      let rooted = false
+      const ensuredRelativeDirs = new Set<string>()
 
       const ensureConnected = async () => {
         if (connected) return
         await connectWithRetry(client, connectConfig, maxRetries, retryDelay, true)
         connected = true
+        rooted = false
+        currentRelativeDir = ''
+      }
+
+      const ensureRootDir = async () => {
+        if (rooted) return
+        await client.ensureDir(normalizedTargetDir)
+        rooted = true
+        currentRelativeDir = ''
+      }
+
+      const ensureRemoteDir = async (remoteDir: string) => {
+        await ensureRootDir()
+
+        const relativeDir =
+          remoteDir === normalizedTargetDir ? '' : remoteDir.slice(normalizedTargetDir.length).replace(/^\/+/, '')
+
+        if (currentRelativeDir === relativeDir) return
+
+        if (!relativeDir) {
+          await client.cd(normalizedTargetDir)
+          currentRelativeDir = ''
+          return
+        }
+
+        await client.cd(normalizedTargetDir)
+        if (!ensuredRelativeDirs.has(relativeDir)) {
+          await client.ensureDir(relativeDir)
+          ensuredRelativeDirs.add(relativeDir)
+        } else {
+          await client.cd(relativeDir)
+        }
+        currentRelativeDir = relativeDir
       }
 
       const markDisconnected = () => {
         connected = false
+        rooted = false
+        currentRelativeDir = ''
+        ensuredRelativeDirs.clear()
       }
 
       try {
         while (true) {
-          const index = currentIndex++
-          if (index >= tasks.length) return
+          const groupIndex = currentGroupIndex++
+          if (groupIndex >= taskGroups.length) return
 
-          const task = tasks[index]
-          updateProgress()
+          const taskGroup = taskGroups[groupIndex]
+          for (const task of taskGroup.tasks) {
+            updateProgress()
 
-          const result = await uploadFileWithRetry(task, {
-            client,
-            ensureConnected,
-            markDisconnected,
-            silentLogs,
-            maxRetries,
-            retryDelay,
-          })
+            const result = await uploadFileWithRetry(task, {
+              client,
+              ensureConnected,
+              ensureRemoteDir,
+              markDisconnected,
+              silentLogs,
+              maxRetries,
+              retryDelay,
+            })
 
-          completed++
-          retries += result.retries
-          if (result.success) {
-            uploadedBytes += result.size
-          } else {
-            failed++
+            completed++
+            retries += result.retries
+            if (result.success) {
+              uploadedBytes += result.size
+            } else {
+              failed++
+            }
+            results.push(result)
+            updateProgress()
           }
-          results.push(result)
-          updateProgress()
         }
       } finally {
         client.close()
