@@ -42,25 +42,25 @@
   "description": "将dist目录下的文件上传到ftp服务器",
   "devDependencies": {
     "@types/cli-progress": "^3.11.6",
-    "@types/node": "^22.15.32",
-    "@types/yazl": "^3.3.0",
-    "prettier": "3.8.1",
-    "tsup": "^8.5.0",
-    "typescript": "^5.8.3"
+    "@types/node": "^25.7.0",
+    "@types/yazl": "^3.3.1",
+    "prettier": "3.8.3",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
   },
   "peerDependencies": {
     "vite": "^6.0.3 || ^7 || ^8"
   },
   "dependencies": {
-    "@inquirer/prompts": "^7.5.3",
-    "basic-ftp": "^5.0.5",
-    "chalk": "^5.4.1",
+    "@inquirer/prompts": "^8.4.3",
+    "basic-ftp": "^6.0.1",
+    "chalk": "^5.6.2",
     "cli-progress": "^3.12.0",
-    "cli-truncate": "^5.2.0",
-    "dayjs": "^1.11.13",
+    "cli-truncate": "^6.0.0",
+    "dayjs": "^1.11.20",
     "log-symbols": "^7.0.1",
-    "ora": "^8.2.0",
-    "string-width": "^8.2.0",
+    "ora": "^9.4.0",
+    "string-width": "^8.2.1",
     "yazl": "^3.3.1"
   }
 }
