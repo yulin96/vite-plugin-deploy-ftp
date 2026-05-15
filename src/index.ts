@@ -20,7 +20,14 @@ import type {
 } from './types'
 import { createTempDir, createZipFile, getAllFiles } from './utils/file'
 import { connectWithRetry, sleep, validateFtpConfig } from './utils/ftp'
-import { getLogSymbol, getPanelDot, renderInlineStats, renderPanel, truncateTerminalText } from './utils/output'
+import {
+  getLogSymbol,
+  getPanelDot,
+  renderInlineStats,
+  renderPanel,
+  truncateTerminalText,
+  type TerminalRow,
+} from './utils/output'
 import {
   normalizeFtpUploadPath,
   normalizeRemotePath,
@@ -80,7 +87,8 @@ const renderBackupPanel = (summary: BackupSummary): string => {
     { label: '结果:', value: chalk.green(`${summary.items.length} 个备份文件`) },
     ...previewItems.map((item, index) => ({
       label: `文件 ${index + 1}:`,
-      value: chalk.cyan(truncateTerminalText(item, 22)),
+      value: chalk.cyan(item),
+      preserveValue: true,
     })),
   ]
 
@@ -809,7 +817,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       const accessUrl = normalizedAlias ? resolveDisplayUrl(normalizedAlias, normalizedUploadPath) : ''
 
       clearScreen()
-      const resultRows = [
+      const resultRows: TerminalRow[] = [
         {
           label: '结果:',
           value:
@@ -828,7 +836,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         },
       ]
       if (accessUrl) {
-        resultRows.push({ label: '访问:', value: chalk.cyan(truncateTerminalText(accessUrl, 20)) })
+        resultRows.push({ label: '访问:', value: chalk.cyan(accessUrl), preserveValue: true })
       }
 
       if (failedCount > 0) {

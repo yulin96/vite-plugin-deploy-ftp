@@ -6,6 +6,7 @@ import stringWidth from 'string-width'
 export interface TerminalRow {
   label: string
   value: string
+  preserveValue?: boolean
 }
 
 type PanelTone = 'info' | 'success' | 'warning' | 'danger'
@@ -43,7 +44,8 @@ export const renderPanel = (title: string, rows: TerminalRow[], tone: PanelTone 
       const paddedLabel = padVisual(row.label, labelWidth)
       const prefix = `${paddedLabel}  `
       const availableValueWidth = Math.max(8, innerWidth - stringWidth(prefix))
-      contentLines.push(`${chalk.gray(prefix)}${fitVisual(row.value, availableValueWidth)}`)
+      const value = row.preserveValue ? row.value : fitVisual(row.value, availableValueWidth)
+      contentLines.push(`${chalk.gray(prefix)}${value}`)
     }
   }
 
@@ -54,7 +56,12 @@ export const renderPanel = (title: string, rows: TerminalRow[], tone: PanelTone 
 
   const top = color(`╭${'─'.repeat(innerWidth + 2)}╮`)
   const bottom = color(`╰${'─'.repeat(innerWidth + 2)}╯`)
-  const body = contentLines.map((line) => `${color('│')} ${fitVisual(line, innerWidth)} ${color('│')}`).join('\n')
+  const body = contentLines
+    .map((line) => {
+      const fittedLine = stringWidth(line) > innerWidth ? line : fitVisual(line, innerWidth)
+      return `${color('│')} ${fittedLine} ${color('│')}`
+    })
+    .join('\n')
   return `${top}\n${body}\n${bottom}`
 }
 
