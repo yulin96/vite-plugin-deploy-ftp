@@ -137,7 +137,12 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     ? safeOption.ftps || []
     : [{ ...safeOption, name: safeOption.name || safeOption.alias || safeOption.host }]
   const defaultFtp = isMultiFtp ? safeOption.defaultFtp : undefined
-  const normalizedUploadPath = normalizeFtpUploadPath(uploadPath)
+  const uploadPaths = Array.isArray(uploadPath) ? uploadPath : [uploadPath]
+  const normalizedUploadPaths = Array.from(
+    new Set(
+      uploadPaths.map((targetPath) => (typeof targetPath === 'string' ? normalizeFtpUploadPath(targetPath) : '/')),
+    ),
+  )
 
   let outDir = normalizePath(path.resolve('dist'))
   let upload = false
@@ -155,7 +160,15 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
   const validateOptions = (): string[] => {
     const errors: string[] = []
 
-    if (!uploadPath) errors.push('uploadPath is required')
+    if (uploadPaths.length === 0) {
+      errors.push('uploadPath is required')
+    }
+
+    uploadPaths.forEach((targetPath, index) => {
+      if (typeof targetPath !== 'string' || targetPath.trim() === '') {
+        errors.push(`uploadPath${uploadPaths.length > 1 ? `[${index}]` : ''} is required`)
+      }
+    })
     if (!Number.isInteger(maxRetries) || maxRetries < 1) errors.push('maxRetries must be >= 1')
     if (!Number.isFinite(retryDelay) || retryDelay < 0) errors.push('retryDelay must be >= 0')
     if (!Number.isInteger(concurrency) || concurrency < 1) errors.push('concurrency must be >= 1')
@@ -653,7 +666,10 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     return { results, debugEntries }
   }
 
-  const deploySingleTarget = async (ftpConfig: FtpConfig): Promise<DeployTargetResult> => {
+  const deploySingleTarget = async (
+    ftpConfig: FtpConfig,
+    normalizedUploadPath: string,
+  ): Promise<DeployTargetResult> => {
     const { host, port = 21, user, password, alias = '', name } = ftpConfig
     const normalizedAlias = alias ? normalizeUrlLikeBase(alias) : ''
 
@@ -675,11 +691,12 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     })
     const totalFiles = allFiles.length
     const displayName = name || host
+    const resultName = normalizedUploadPaths.length > 1 ? `${displayName} ${normalizedUploadPath}` : displayName
     const startTime = Date.now()
 
     if (allFiles.length === 0) {
       console.log(`${getLogSymbol('warning')} 没有找到需要上传的文件`)
-      return { name: displayName, totalFiles: 0, failedCount: 0 }
+      return { name: resultName, totalFiles: 0, failedCount: 0 }
     }
 
     clearScreen()
@@ -873,7 +890,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         console.log(renderDebugPanel(debugEntries))
       }
 
-      return { name: displayName, totalFiles: results.length, failedCount }
+      return { name: resultName, totalFiles: results.length, failedCount }
     } catch (error) {
       if (preflightSpinner) preflightSpinner.stop()
 
@@ -886,7 +903,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         console.log(renderDebugPanel(debugEntries))
       }
       return {
-        name: displayName,
+        name: resultName,
         totalFiles,
         failedCount: totalFiles > 0 ? totalFiles : 1,
         error: error instanceof Error ? error : new Error(String(error)),
@@ -966,8 +983,10 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
     const deployResults: DeployTargetResult[] = []
 
     for (const ftpConfig of selectedConfigs) {
-      const targetResult = await deploySingleTarget(ftpConfig)
-      deployResults.push(targetResult)
+      for (const normalizedUploadPath of normalizedUploadPaths) {
+        const targetResult = await deploySingleTarget(ftpConfig, normalizedUploadPath)
+        deployResults.push(targetResult)
+      }
     }
 
     return deployResults

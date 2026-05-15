@@ -1,5 +1,5 @@
 export interface BaseOption {
-  uploadPath: string
+  uploadPath: string | string[]
   singleBackFiles?: string[]
   singleBack?: boolean
   debug?: boolean
