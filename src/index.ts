@@ -5,7 +5,6 @@ import cliProgress from 'cli-progress'
 import dayjs from 'dayjs'
 import fs from 'node:fs'
 import { stat } from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import ora from 'ora'
 import { normalizePath, Plugin, type ResolvedConfig } from 'vite'
@@ -613,8 +612,10 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
         elapsed: formatDuration(elapsedSeconds).replace(/s$/, ''),
       })
       progressBar.stop()
+    } else if (failed > 0) {
+      console.log(`${getLogSymbol('warning')} 文件上传结束，成功 ${completed - failed}/${totalFiles}，失败 ${failed}`)
     } else {
-      console.log(`${getLogSymbol('success')} 所有文件上传完成 (${totalFiles}/${totalFiles})`)
+      console.log(`${getLogSymbol('success')} 文件上传完成 (${totalFiles}/${totalFiles})`)
     }
 
     debugEntries.push(
@@ -978,8 +979,7 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
       const validationErrors = validateOptions()
       if (validationErrors.length > 0) {
-        console.log(`${chalk.red('✗ 配置错误:')}\n${validationErrors.map((err) => `  - ${err}`).join('\n')}`)
-        return
+        throw new Error(`配置错误:\n${validationErrors.map((err) => `  - ${err}`).join('\n')}`)
       }
 
       upload = true
@@ -1068,15 +1068,11 @@ async function createBackupFile(
   const backupSpinner = useSpinner ? ora(`创建备份文件中 ${chalk.yellow(`==> ${targetUrl}`)}`).start() : null
 
   const fileName = `backup_${dayjs().format('YYYYMMDD_HHmmss')}.zip`
-  const tempDir = createTempDir('backup-zip')
-  const zipFilePath = path.join(os.tmpdir(), 'vite-plugin-deploy-ftp', fileName)
+  const tempDir = createTempDir('backup-download')
+  const zipTempDir = createTempDir('backup-zip')
+  const zipFilePath = path.join(zipTempDir.path, fileName)
 
   try {
-    const zipDir = path.dirname(zipFilePath)
-    if (!fs.existsSync(zipDir)) {
-      fs.mkdirSync(zipDir, { recursive: true })
-    }
-
     if (backupSpinner) {
       backupSpinner.text = `下载远程文件中 ${chalk.yellow(`==> ${targetUrl}`)}`
     }
@@ -1124,6 +1120,7 @@ async function createBackupFile(
     throw error
   } finally {
     tempDir.cleanup()
+    zipTempDir.cleanup()
     try {
       if (fs.existsSync(zipFilePath)) {
         fs.rmSync(zipFilePath)
@@ -1151,17 +1148,18 @@ async function createSingleBackup(
   let backupProgressSpinner: ReturnType<typeof ora> | undefined
 
   try {
-    const remoteFiles = await client.list(dir)
     const normalizedSingleBackFiles = singleBackFiles
       .map((fileName) => normalizeSelectionPath(fileName))
+      .map((fileName) =>
+        fileName
+          .split('/')
+          .filter((segment) => segment && segment !== '.')
+          .join('/'),
+      )
+      .filter((fileName) => !fileName.split('/').includes('..'))
       .filter(Boolean)
 
-    const backupTasks = normalizedSingleBackFiles
-      .map((fileName) => {
-        const remoteFile = remoteFiles.find((file) => file.name === fileName)
-        return remoteFile ? { fileName, exists: true } : { fileName, exists: false }
-      })
-      .filter((task) => task.exists)
+    const backupTasks = normalizedSingleBackFiles.map((fileName) => ({ fileName }))
 
     if (backupTasks.length === 0) {
       if (backupSpinner) {
@@ -1183,35 +1181,35 @@ async function createSingleBackup(
       backupProgressSpinner = ora('正在备份文件...').start()
     }
 
-    const concurrencyLimit = 3
     let backedUpCount = 0
     const backedUpFiles: string[] = []
 
-    for (let i = 0; i < backupTasks.length; i += concurrencyLimit) {
-      const batch = backupTasks.slice(i, i + concurrencyLimit)
-      const promises = batch.map(async ({ fileName }) => {
-        try {
-          const localTempPath = path.join(tempDir.path, fileName)
-          const extIndex = fileName.lastIndexOf('.')
-          const name = extIndex > -1 ? fileName.slice(0, extIndex) : fileName
-          const ext = extIndex > -1 ? fileName.slice(extIndex) : ''
-          const backupFileName = `${name}.${timestamp}${ext}`
-          const sourceRemotePath = normalizeRemotePath(dir, fileName)
-          const backupRemotePath = normalizeRemotePath(dir, backupFileName)
-
-          await client.downloadTo(localTempPath, sourceRemotePath)
-          await client.uploadFrom(localTempPath, backupRemotePath)
-
-          backedUpFiles.push(resolveDisplayUrl(alias, backupRemotePath))
-          return true
-        } catch (error) {
-          console.warn(chalk.yellow(`备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
-          return false
+    for (const { fileName } of backupTasks) {
+      try {
+        const localTempPath = path.join(tempDir.path, fileName)
+        const localTempDir = path.dirname(localTempPath)
+        if (!fs.existsSync(localTempDir)) {
+          fs.mkdirSync(localTempDir, { recursive: true })
         }
-      })
 
-      const results = await Promise.all(promises)
-      backedUpCount += results.filter(Boolean).length
+        const fileDir = path.posix.dirname(fileName)
+        const fileBaseName = path.posix.basename(fileName)
+        const extIndex = fileBaseName.lastIndexOf('.')
+        const name = extIndex > -1 ? fileBaseName.slice(0, extIndex) : fileBaseName
+        const ext = extIndex > -1 ? fileBaseName.slice(extIndex) : ''
+        const backupFileName = `${name}.${timestamp}${ext}`
+        const backupRelativePath = fileDir === '.' ? backupFileName : normalizeRemotePath(fileDir, backupFileName)
+        const sourceRemotePath = normalizeRemotePath(dir, fileName)
+        const backupRemotePath = normalizeRemotePath(dir, backupRelativePath)
+
+        await client.downloadTo(localTempPath, sourceRemotePath)
+        await client.uploadFrom(localTempPath, backupRemotePath)
+
+        backedUpFiles.push(resolveDisplayUrl(alias, backupRemotePath))
+        backedUpCount++
+      } catch (error) {
+        console.warn(chalk.yellow(`备份文件 ${fileName} 失败:`), error instanceof Error ? error.message : error)
+      }
     }
 
     if (backedUpCount > 0) {

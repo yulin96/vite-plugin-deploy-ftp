@@ -24,11 +24,14 @@ export function getAllFiles(dirPath: string, arrayOfFiles: string[] = [], relati
 
 export function createTempDir(basePath: string): TempDir {
   const tempBaseDir = os.tmpdir()
-  const tempPath = path.join(tempBaseDir, 'vite-plugin-deploy-ftp', basePath)
+  const tempParentDir = path.join(tempBaseDir, 'vite-plugin-deploy-ftp')
+  const safeBasePath = basePath.replace(/[\\/]+/g, '-').replace(/[^a-zA-Z0-9._-]/g, '-') || 'temp'
 
-  if (!fs.existsSync(tempPath)) {
-    fs.mkdirSync(tempPath, { recursive: true })
+  if (!fs.existsSync(tempParentDir)) {
+    fs.mkdirSync(tempParentDir, { recursive: true })
   }
+
+  const tempPath = fs.mkdtempSync(path.join(tempParentDir, `${safeBasePath}-`))
 
   return {
     path: tempPath,
