@@ -1,16 +1,20 @@
 # vite-plugin-deploy-ftp
 
-把 Vite 打包后的目录上传到 FTP，适合不想手动打开 FTP 工具、重复拖文件发布的项目。
+Uploads the directory bundled by Vite to an FTP server. It is ideal for projects where you don't want to open FTP tools manually and repeatedly drag files to publish.
 
-## 安装
+[![npm version](https://img.shields.io/npm/v/vite-plugin-deploy-ftp.svg)](https://www.npmjs.com/package/vite-plugin-deploy-ftp)
+[![npm downloads](https://img.shields.io/npm/dm/vite-plugin-deploy-ftp.svg)](https://www.npmjs.com/package/vite-plugin-deploy-ftp)
+[![License](https://img.shields.io/npm/l/vite-plugin-deploy-ftp.svg)](https://github.com/yulin96/vite-plugin-deploy-ftp)
+
+## Installation
 
 ```bash
 pnpm add vite-plugin-deploy-ftp -D
 ```
 
-## 快速开始
+## Quick Start
 
-推荐用环境变量控制是否上传，默认本地普通打包不上传，只有明确开启时才发布。
+It is recommended to control whether to upload using environment variables. By default, local builds will not trigger uploading, and publishing will only happen when explicitly enabled.
 
 ```bash
 # .env
@@ -52,7 +56,7 @@ export default defineConfig(({ mode }) => {
 })
 ```
 
-上传时再打开开关：
+Enable upload when building:
 
 ```bash
 # macOS / Linux
@@ -62,56 +66,56 @@ DEPLOY_FTP=1 pnpm build
 $env:DEPLOY_FTP='1'; pnpm build
 ```
 
-`FTP_PATH` 可以写一个目录：
+`FTP_PATH` can be a single directory:
 
-```bash
+```env
 FTP_PATH=/public_html
 ```
 
-也可以写多个目录：
+Or multiple directories separated by commas:
 
-```bash
+```env
 FTP_PATH=/public_html,/backup_html
 ```
 
-## 常用配置说明
+## Configuration Guide
 
-| 参数              | 说明                                                           |
-| ----------------- | -------------------------------------------------------------- |
-| `open`            | 是否启用上传。推荐用环境变量控制，避免普通打包时误上传。       |
-| `autoUpload`      | 是否跳过“是否上传”的确认。自动发布时建议设为 `true`。          |
-| `failOnError`     | 上传失败时是否让命令失败。发布流程里建议设为 `true`。          |
-| `uploadPath`      | 上传目录。支持字符串，也支持字符串数组，数组会上传到多个目录。 |
-| `alias`           | 访问域名。填写后，上传完成会输出可访问链接。                   |
-| `singleBack`      | 是否只备份指定文件。通常备份 `index.html` 就够，速度更快。     |
-| `singleBackFiles` | 单文件备份列表，支持子目录文件，例如 `assets/app.js`。         |
-| `ftps`            | 多个 FTP 服务器配置。需要发布到多个服务器时使用。              |
-| `defaultFtp`      | 多 FTP 时默认选中的服务器名称，可减少手动选择。                |
-| `concurrency`     | 同时上传的数量。服务器不稳定时保持默认值更稳。                 |
+| Options           | Description                                                                                                                              |
+| :---------------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
+| `open`            | Whether to enable upload. It is recommended to control this via environment variables to avoid accidental uploads during routine builds. |
+| `autoUpload`      | Skip the "confirm upload" prompt. Recommended to set to `true` for automated deployments.                                                |
+| `failOnError`     | Whether to make the build command fail if the upload fails. Recommended to set to `true` in CI/CD pipelines.                             |
+| `uploadPath`      | Upload directory paths. Supports string or array of strings (files will be uploaded to all specified directories).                       |
+| `alias`           | Public URL / domain. If provided, the accessible URL will be printed after uploading.                                                    |
+| `singleBack`      | Whether to back up only specific files instead of the entire directory. Usually backing up `index.html` is enough and much faster.       |
+| `singleBackFiles` | List of files to back up in single-backup mode, supporting sub-directories, e.g., `assets/app.js`.                                       |
+| `ftps`            | Multiple FTP configurations. Used when you need to publish to multiple servers.                                                          |
+| `defaultFtp`      | The default server name when configuring multiple FTPs to reduce manual selection.                                                       |
+| `concurrency`     | Number of simultaneous file uploads. Keep default if the server connection is unstable.                                                  |
 
-## 重要行为说明
+## Key Behaviors
 
-- 插件只在 Vite 构建结束后上传。
-- `open: false` 时不会上传，也不会检查 FTP 配置。
-- `uploadPath` 传数组时，会把同一份文件依次上传到每个目录。
-- 多 FTP 和多目录可以一起使用，会按“服务器 × 目录”的组合逐个上传。
-- 上传前如果远端目录已有文件，会根据配置询问或执行备份。
-- `singleBack: true` 时，只备份 `singleBackFiles` 里的文件。
-- `autoUpload: false` 时，上传前会询问是否继续。
-- 上传失败且 `failOnError: true` 时，构建命令会失败，方便发布系统拦截。
-- 当前版本仅支持 ESM，也就是 `import`，不支持 `require`。
+- **Upload timing**: Uploads only after Vite finishes the build process.
+- **Lazy evaluation**: When `open: false`, the plugin will not upload and will not validate FTP connection parameters.
+- **Multiple paths**: When `uploadPath` is an array, the same build output will be uploaded sequentially to all specified paths.
+- **Cross-product upload**: When combining multiple FTP servers and multiple paths, files are uploaded sequentially for every "Server × Directory" combination.
+- **Backup before upload**: If the remote directory already contains files, the plugin will ask for confirmation or execute backups based on your configuration.
+- **Selective backup**: When `singleBack: true` is configured, only files specified in `singleBackFiles` are backed up.
+- **Manual confirmation**: When `autoUpload: false`, the plugin asks for manual confirmation in the CLI before proceeding.
+- **Pipeline integration**: When `failOnError: true` and upload fails, the build command will exit with a non-zero code to block subsequent pipeline steps.
+- **Module format**: This version only supports ESM (`import` syntax); `require` is not supported.
 
-## 风险提示
+## Risks & Best Practices
 
-- 不建议把 FTP 用户名、密码直接写进 `vite.config.ts`，推荐放到环境变量里。
-- 生产发布建议使用 `open` 环境变量开关，避免普通打包误传线上目录。
-- `uploadPath` 写成数组时，会上传到多个目录，请确认每个目录都是预期目标。
-- 完整备份会下载远端目录并重新上传压缩包，远端文件多时会比较慢。
-- 如果 FTP 服务器不稳定，不建议把 `concurrency` 调太高。
+- **Security**: Do not hardcode FTP usernames and passwords in `vite.config.ts`. Always use environment variables.
+- **Safety**: Ensure you control the production deployments via environment variables (like `open: process.env.DEPLOY_FTP === '1'`) to prevent local routine builds from overwriting production files.
+- **Multiple Targets**: Ensure all paths listed in `uploadPath` are intended targets, especially when uploading to production environments.
+- **Backup Speed**: Full backups require downloading the remote directory and uploading a zip archive back. This can be slow if the remote directory is large.
+- **Rate Limits**: If the remote FTP server is unstable or rate-limited, do not set `concurrency` too high.
 
-## 示例
+## Examples
 
-### 多个 FTP 服务器
+### Multiple FTP Servers
 
 ```ts
 import vitePluginDeployFtp from 'vite-plugin-deploy-ftp'
@@ -146,7 +150,7 @@ export default {
 }
 ```
 
-### 多个上传目录
+### Multiple Upload Directories
 
 ```ts
 import vitePluginDeployFtp from 'vite-plugin-deploy-ftp'
@@ -166,50 +170,50 @@ export default {
 }
 ```
 
-## 完整配置表
+## Options Reference
 
-### 通用参数
+### General Options
 
-| 参数              | 类型                 | 默认值           | 说明                                             |
-| ----------------- | -------------------- | ---------------- | ------------------------------------------------ |
-| `open`            | `boolean`            | `true`           | 是否启用插件                                     |
-| `uploadPath`      | `string \| string[]` | -                | FTP 服务器上的上传路径，传数组时会上传到多个目录 |
-| `singleBack`      | `boolean`            | `false`          | 是否使用单文件备份模式                           |
-| `singleBackFiles` | `string[]`           | `['index.html']` | 单文件备份模式下要备份的文件列表                 |
-| `debug`           | `boolean`            | `false`          | 是否输出调试耗时                                 |
-| `maxRetries`      | `number`             | `3`              | 连接或上传失败时的最大重试次数                   |
-| `retryDelay`      | `number`             | `1000`           | 重试延迟时间，单位毫秒                           |
-| `showBackFile`    | `boolean`            | `false`          | 是否显示备份文件列表                             |
-| `autoUpload`      | `boolean`            | `false`          | 是否跳过上传确认                                 |
-| `fancy`           | `boolean`            | `true`           | 是否使用更丰富的终端输出                         |
-| `failOnError`     | `boolean`            | `true`           | 上传失败时是否中断构建命令                       |
-| `concurrency`     | `number`             | `1`              | 同时上传的任务数量                               |
+| Options           | Type                 | Default          | Description                                                                  |
+| :---------------- | :------------------- | :--------------- | :--------------------------------------------------------------------------- |
+| `open`            | `boolean`            | `true`           | Enable or disable the plugin.                                                |
+| `uploadPath`      | `string \| string[]` | -                | FTP destination path(s). Array values will upload sequentially to all paths. |
+| `singleBack`      | `boolean`            | `false`          | Enable single file backup mode.                                              |
+| `singleBackFiles` | `string[]`           | `['index.html']` | List of file paths to back up when `singleBack` is enabled.                  |
+| `debug`           | `boolean`            | `false`          | Enable verbose debug logs and duration metrics.                              |
+| `maxRetries`      | `number`             | `3`              | Maximum retry attempts for connection/upload failures.                       |
+| `retryDelay`      | `number`             | `1000`           | Delay between retry attempts (ms).                                           |
+| `showBackFile`    | `boolean`            | `false`          | Print backup file list to the console.                                       |
+| `autoUpload`      | `boolean`            | `false`          | Bypass CLI confirmation prompt before starting uploads.                      |
+| `fancy`           | `boolean`            | `true`           | Enable stylish console UI outputs.                                           |
+| `failOnError`     | `boolean`            | `true`           | Throw errors to fail the Vite build command on upload failure.               |
+| `concurrency`     | `number`             | `1`              | Number of simultaneous file uploads.                                         |
 
-### 单个 FTP 配置参数
+### Single FTP Configuration
 
-| 参数       | 类型     | 默认值 | 说明                       |
-| ---------- | -------- | ------ | -------------------------- |
-| `name`     | `string` | -      | FTP 配置名称               |
-| `host`     | `string` | -      | FTP 服务器地址             |
-| `port`     | `number` | `21`   | FTP 服务器端口             |
-| `user`     | `string` | -      | FTP 用户名                 |
-| `password` | `string` | -      | FTP 密码                   |
-| `alias`    | `string` | `''`   | 网站别名，用于生成完整 URL |
+| Options    | Type     | Default | Description                                               |
+| :--------- | :------- | :------ | :-------------------------------------------------------- |
+| `name`     | `string` | -       | Identifier for the FTP configuration.                     |
+| `host`     | `string` | -       | FTP host address.                                         |
+| `port`     | `number` | `21`    | FTP port.                                                 |
+| `user`     | `string` | -       | FTP username.                                             |
+| `password` | `string` | -       | FTP password.                                             |
+| `alias`    | `string` | `''`    | Public site URL alias used to format the final page link. |
 
-### 多个 FTP 配置参数
+### Multiple FTP Configuration
 
-| 参数         | 类型          | 说明                    |
-| ------------ | ------------- | ----------------------- |
-| `ftps`       | `FtpConfig[]` | FTP 服务器配置数组      |
-| `defaultFtp` | `string`      | 默认使用的 FTP 配置名称 |
+| Options      | Type          | Description                                      |
+| :----------- | :------------ | :----------------------------------------------- |
+| `ftps`       | `FtpConfig[]` | List of FTP server configurations.               |
+| `defaultFtp` | `string`      | Default FTP config name to select automatically. |
 
-### FtpConfig 对象
+### FtpConfig Object
 
-| 参数       | 类型     | 默认值 | 说明                               |
-| ---------- | -------- | ------ | ---------------------------------- |
-| `name`     | `string` | -      | FTP 服务器名称（用于选择界面显示） |
-| `host`     | `string` | -      | FTP 服务器地址                     |
-| `port`     | `number` | `21`   | FTP 服务器端口                     |
-| `user`     | `string` | -      | FTP 用户名                         |
-| `password` | `string` | -      | FTP 密码                           |
-| `alias`    | `string` | `''`   | 网站别名，用于生成完整 URL         |
+| Options    | Type     | Default | Description                                               |
+| :--------- | :------- | :------ | :-------------------------------------------------------- |
+| `name`     | `string` | -       | FTP configuration name (shown in selection prompt).       |
+| `host`     | `string` | -       | FTP host address.                                         |
+| `port`     | `number` | `21`    | FTP port.                                                 |
+| `user`     | `string` | -       | FTP username.                                             |
+| `password` | `string` | -       | FTP password.                                             |
+| `alias`    | `string` | `''`    | Public site URL alias used to format the final page link. |
