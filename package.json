@@ -16,7 +16,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./deploy": {
+      "types": "./dist/deploy.d.ts",
+      "default": "./dist/deploy.js"
     }
+  },
+  "bin": {
+    "deploy-ftp": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsup",
@@ -26,7 +33,9 @@
     "pack": "pnpm run build && pnpm pack",
     "build:test": "cd playground && vite build",
     "build:test:deploy": "cd playground && vite build --mode deploy",
-    "build:test:debug": "cd playground && vite build --mode deploy-debug"
+    "build:test:debug": "cd playground && vite build --mode deploy-debug",
+    "deploy:test:api": "pnpm run build && pnpm run build:test && node playground/deploy-api.mjs",
+    "deploy:test:cli": "pnpm run build && pnpm run build:test && node dist/cli.js --config playground/deploy-ftp.config.mjs"
   },
   "keywords": [
     "vite-plugin",

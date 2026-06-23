@@ -2,9 +2,9 @@ import chalk from 'chalk'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { normalizePath } from 'vite'
 import yazl from 'yazl'
 import type { TempDir } from '../types'
+import { normalizeSlash } from './path'
 
 export function getAllFiles(dirPath: string, arrayOfFiles: string[] = [], relativePath = '') {
   const files = fs.readdirSync(dirPath)
@@ -15,7 +15,7 @@ export function getAllFiles(dirPath: string, arrayOfFiles: string[] = [], relati
     if (fs.statSync(fullPath).isDirectory()) {
       getAllFiles(fullPath, arrayOfFiles, relPath)
     } else {
-      arrayOfFiles.push(normalizePath(relPath))
+      arrayOfFiles.push(normalizeSlash(relPath))
     }
   })
 
@@ -64,7 +64,7 @@ export async function createZipFile(sourceDir: string, outputPath: string): Prom
 
     for (const relativePath of getAllFiles(sourceDir)) {
       const filePath = path.join(sourceDir, relativePath)
-      zipFile.addFile(filePath, normalizePath(relativePath))
+      zipFile.addFile(filePath, normalizeSlash(relativePath))
     }
 
     zipFile.end()

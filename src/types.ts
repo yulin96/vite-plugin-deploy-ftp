@@ -4,6 +4,11 @@ export interface BaseOption {
   singleBack?: boolean
   debug?: boolean
   open?: boolean
+  outDir?: string
+  skip?: string | string[]
+  autoDelete?: boolean
+  manifest?: ManifestConfig
+  configBase?: string
   maxRetries?: number
   retryDelay?: number
   showBackFile?: boolean
@@ -29,6 +34,23 @@ export type vitePluginDeployFtpOption =
     })
   | (BaseOption & FtpConfig)
 
+export type DeployFtpOption = vitePluginDeployFtpOption
+
+export interface DeployFtpResult {
+  success: boolean
+  targets: DeployTargetResult[]
+  outDir: string
+  totalFiles: number
+  failedCount: number
+  manifestUrls: string[]
+}
+
+export interface ManifestOption {
+  fileName?: string
+}
+
+export type ManifestConfig = boolean | ManifestOption | undefined
+
 export interface TempDir {
   path: string
   cleanup: () => void
@@ -37,6 +59,7 @@ export interface TempDir {
 export interface UploadResult {
   success: boolean
   file: string
+  relativeFilePath: string
   name: string
   size: number
   retries: number
@@ -45,6 +68,7 @@ export interface UploadResult {
 
 export interface UploadTask {
   filePath: string
+  relativeFilePath: string
   remotePath: string
   size: number
 }
@@ -67,6 +91,7 @@ export interface DeployTargetResult {
   totalFiles: number
   failedCount: number
   error?: Error
+  manifestUrl?: string
 }
 
 export type ValidFtpConfig = Required<Pick<FtpConfig, 'host' | 'user' | 'password'>> & FtpConfig
@@ -74,4 +99,15 @@ export type ValidFtpConfig = Required<Pick<FtpConfig, 'host' | 'user' | 'passwor
 export interface BackupSummary {
   title: string
   items: string[]
+}
+
+export interface ManifestFileItem {
+  file: string
+  path: string
+  url: string
+}
+
+export interface ManifestPayload {
+  version: number
+  files: ManifestFileItem[]
 }

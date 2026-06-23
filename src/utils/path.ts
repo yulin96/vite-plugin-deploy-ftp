@@ -1,3 +1,7 @@
+import type { ManifestConfig } from '../types'
+
+const DEFAULT_MANIFEST_FILE_NAME = 'ftp-manifest.json'
+
 export const normalizeSlash = (value: string): string => value.replace(/\\/g, '/').trim()
 
 export const normalizePathSegments = (...values: Array<string | undefined>): string =>
@@ -65,6 +69,22 @@ export const normalizeUrlLikeBase = (base: string): string => {
 
 export const normalizeSelectionPath = (value: string): string => normalizePathSegments(value)
 
+export const ensureTrailingSlash = (value: string): string => {
+  if (!value || value.endsWith('/')) return value
+  return `${value}/`
+}
+
+export const normalizeManifestFileName = (fileName?: string): string => {
+  const normalized = normalizePathSegments(fileName || DEFAULT_MANIFEST_FILE_NAME)
+  return normalized || DEFAULT_MANIFEST_FILE_NAME
+}
+
+export const resolveManifestFileName = (manifest: ManifestConfig): string | null => {
+  if (!manifest) return null
+  if (manifest === true) return DEFAULT_MANIFEST_FILE_NAME
+  return normalizeManifestFileName(manifest.fileName)
+}
+
 export const joinUrlLikePath = (base: string, targetPath: string): string => {
   const normalizedBase = normalizeUrlLikeBase(base).replace(/\/+$/, '')
   const normalizedTargetPath = normalizePathSegments(targetPath)
@@ -80,4 +100,20 @@ export const resolveDisplayUrl = (alias: string | undefined, targetPath: string)
 
   if (!alias) return normalizedTargetPath
   return joinUrlLikePath(alias, normalizedTargetPath)
+}
+
+export const encodeUrlPath = (targetPath: string): string => encodeURI(normalizePathSegments(targetPath))
+
+export const joinUrlPath = (base: string, targetPath: string): string =>
+  `${normalizeUrlLikeBase(base).replace(/\/+$/, '')}/${encodeUrlPath(targetPath)}`
+
+export const resolveUploadedFileUrl = (
+  relativeFilePath: string,
+  remotePath: string,
+  configBase?: string,
+  alias?: string,
+): string => {
+  if (configBase) return joinUrlPath(configBase, relativeFilePath)
+  if (alias) return joinUrlPath(alias, remotePath)
+  return remotePath
 }

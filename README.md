@@ -78,6 +78,52 @@ Or multiple directories separated by commas:
 FTP_PATH=/public_html,/backup_html
 ```
 
+## Direct API
+
+You can also upload an already-built directory without running Vite:
+
+```js
+import { deployFtp } from 'vite-plugin-deploy-ftp/deploy'
+
+await deployFtp({
+  host: process.env.FTP_HOST,
+  port: +(process.env.FTP_PORT || 21),
+  user: process.env.FTP_USER,
+  password: process.env.FTP_PASSWORD,
+  alias: process.env.FTP_ALIAS,
+  outDir: 'dist',
+  uploadPath: '/public_html',
+  autoUpload: true,
+  skip: ['**/*.html'],
+  manifest: true,
+  configBase: `${process.env.FTP_ALIAS}/public_html/`,
+})
+```
+
+## Direct CLI
+
+Create `deploy-ftp.config.mjs`:
+
+```js
+import { defineDeployConfig } from 'vite-plugin-deploy-ftp'
+
+export default defineDeployConfig({
+  host: process.env.FTP_HOST,
+  port: +(process.env.FTP_PORT || 21),
+  user: process.env.FTP_USER,
+  password: process.env.FTP_PASSWORD,
+  outDir: 'dist',
+  uploadPath: '/public_html',
+  autoUpload: true,
+})
+```
+
+Run:
+
+```bash
+deploy-ftp --config deploy-ftp.config.mjs
+```
+
 ## Configuration Guide
 
 | Options           | Description                                                                                                                              |
@@ -85,8 +131,13 @@ FTP_PATH=/public_html,/backup_html
 | `open`            | Whether to enable upload. It is recommended to control this via environment variables to avoid accidental uploads during routine builds. |
 | `autoUpload`      | Skip the "confirm upload" prompt. Recommended to set to `true` for automated deployments.                                                |
 | `failOnError`     | Whether to make the build command fail if the upload fails. Recommended to set to `true` in CI/CD pipelines.                             |
+| `outDir`          | Local directory to upload when using the direct API or CLI.                                                                              |
 | `uploadPath`      | Upload directory paths. Supports string or array of strings (files will be uploaded to all specified directories).                       |
 | `alias`           | Public URL / domain. If provided, the accessible URL will be printed after uploading.                                                    |
+| `skip`            | Glob-like patterns for files that should not be uploaded, e.g. `**/*.html`.                                                             |
+| `manifest`        | Generate and upload `ftp-manifest.json`, or pass `{ fileName }` to customize the file name.                                             |
+| `configBase`      | URL base used to build manifest file URLs.                                                                                               |
+| `autoDelete`      | Delete local files after each file is uploaded successfully.                                                                             |
 | `singleBack`      | Whether to back up only specific files instead of the entire directory. Usually backing up `index.html` is enough and much faster.       |
 | `singleBackFiles` | List of files to back up in single-backup mode, supporting sub-directories, e.g., `assets/app.js`.                                       |
 | `ftps`            | Multiple FTP configurations. Used when you need to publish to multiple servers.                                                          |
