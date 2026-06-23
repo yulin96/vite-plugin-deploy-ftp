@@ -9,10 +9,6 @@ await deployFtp({
 
   outDir: 'playground/__dist__',
   uploadPath: '/__test/vite-plugin-deploy-ftp/__direct-api__/',
-  skip: ['**/*.html'],
   autoUpload: true,
   singleBack: true,
-  autoDelete: false,
-  manifest: true,
-  configBase: `${process.env.zH5FtpAlias || ''}/__test/vite-plugin-deploy-ftp/__direct-api__/`,
 })

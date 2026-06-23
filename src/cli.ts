@@ -26,9 +26,6 @@ Options:
   --user <user>            FTP username
   --password <password>    FTP password
   --alias <url>            Public URL alias
-  --configBase <url>       URL base used by manifest
-  --skip <glob>            Glob to skip, can be used multiple times
-  --manifest [file]        Enable manifest, optional file name
   --concurrency <number>   Upload concurrency
   --maxRetries <number>    Retry times
   --retryDelay <number>    Retry delay in ms
@@ -38,7 +35,6 @@ Options:
   --show-back-file         Print backup file list
   --debug                  Show debug timing
   --no-fancy               Disable styled progress
-  --auto-delete            Delete local files after successful upload
   --no-fail-on-error       Do not exit with error on upload failure
   -h, --help               Show help
 `.trim()
@@ -77,8 +73,7 @@ const parseArgs = (args: string[]): { configPath?: string; option: Partial<Deplo
       case '--host':
       case '--user':
       case '--password':
-      case '--alias':
-      case '--configBase': {
+      case '--alias': {
         const key = arg.slice(2) as keyof DeployFtpOption
         option[key] = readValue(args, i, arg) as never
         i++
@@ -87,21 +82,6 @@ const parseArgs = (args: string[]): { configPath?: string; option: Partial<Deplo
       case '--uploadPath': {
         option.uploadPath = appendValue(option.uploadPath, readValue(args, i, arg))
         i++
-        break
-      }
-      case '--skip': {
-        option.skip = appendValue(option.skip, readValue(args, i, arg))
-        i++
-        break
-      }
-      case '--manifest': {
-        const next = args[i + 1]
-        if (next && !next.startsWith('-')) {
-          option.manifest = { fileName: next }
-          i++
-        } else {
-          option.manifest = true
-        }
         break
       }
       case '--single-back-file': {
@@ -124,9 +104,6 @@ const parseArgs = (args: string[]): { configPath?: string; option: Partial<Deplo
         break
       case '--no-fancy':
         option.fancy = false
-        break
-      case '--auto-delete':
-        option.autoDelete = true
         break
       case '--no-fail-on-error':
         option.failOnError = false

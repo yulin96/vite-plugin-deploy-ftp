@@ -4,7 +4,7 @@ import chalk from 'chalk'
 import cliProgress from 'cli-progress'
 import dayjs from 'dayjs'
 import fs from 'node:fs'
-import { mkdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import path from 'node:path'
 import ora from 'ora'
 import type {
@@ -14,7 +14,6 @@ import type {
   DeployTargetResult,
   FtpConfig,
   FtpConnectConfig,
-  ManifestPayload,
   UploadResult,
   UploadTask,
   UploadTaskGroup,
@@ -30,15 +29,12 @@ import {
   type TerminalRow,
 } from './utils/output'
 import {
-  ensureTrailingSlash,
   normalizeFtpUploadPath,
   normalizeRemotePath,
   normalizeSelectionPath,
   normalizeSlash,
   normalizeUrlLikeBase,
-  resolveManifestFileName,
   resolveDisplayUrl,
-  resolveUploadedFileUrl,
 } from './utils/path'
 import { formatBytes, formatDuration } from './utils/progress'
 
@@ -106,49 +102,12 @@ const renderDebugPanel = (entries: DebugTimingEntry[]): string => {
   return renderPanel(`${getPanelDot('success')} 调试耗时`, rows, 'info')
 }
 
-const createSkipMatcher = (patterns: string[]) => {
-  const regexes = patterns.map((pattern) => {
-    const normalized = normalizeSlash(pattern)
-    const source = normalized
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*\*\//g, '(?:.*/)?')
-      .replace(/\*\*/g, '.*')
-      .replace(/\*/g, '[^/]*')
-    return new RegExp(`^${source}$`)
-  })
-
-  return (filePath: string) => regexes.some((regex) => regex.test(filePath))
-}
-
-const createManifestPayload = (
-  results: UploadResult[],
-  configBase?: string,
-  alias?: string,
-): ManifestPayload => {
-  const files = results
-    .filter((result) => result.success)
-    .map((result) => ({
-      file: result.relativeFilePath,
-      path: result.name,
-      url: resolveUploadedFileUrl(result.relativeFilePath, result.name, configBase, alias),
-    }))
-
-  return {
-    version: Date.now(),
-    files,
-  }
-}
-
 export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResult> => {
   const safeOption = (option || {}) as DeployFtpOption
   const {
     open = true,
     outDir: optionOutDir = 'dist',
     uploadPath = '',
-    skip,
-    autoDelete = false,
-    manifest = false,
-    configBase,
     singleBack = false,
     singleBackFiles = ['index.html'],
     showBackFile = false,
@@ -172,9 +131,6 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
       uploadPaths.map((targetPath) => (typeof targetPath === 'string' ? normalizeFtpUploadPath(targetPath) : '/')),
     ),
   )
-  const effectiveSkip = skip ? (Array.isArray(skip) ? skip : [skip]) : []
-  const normalizedConfigBase = configBase ? ensureTrailingSlash(normalizeUrlLikeBase(configBase)) : undefined
-  const manifestFileName = resolveManifestFileName(manifest)
 
   const outDir = normalizeSlash(path.resolve(optionOutDir))
 
@@ -193,7 +149,6 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
       outDir,
       totalFiles: 0,
       failedCount: 0,
-      manifestUrls: [],
     }
   }
 
@@ -262,13 +217,6 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
         await context.client.uploadFrom(task.filePath, path.posix.basename(task.remotePath))
         if (context.debugMetrics) {
           context.debugMetrics.uploadMs += Date.now() - uploadStartedAt
-        }
-        if (autoDelete) {
-          try {
-            await unlink(task.filePath)
-          } catch {
-            console.warn(`${getLogSymbol('warning')} 删除本地文件失败: ${truncateTerminalText(task.relativeFilePath, 18)}`)
-          }
         }
         return {
           success: true,
@@ -734,10 +682,7 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
 
     const debugEntries: DebugTimingEntry[] = []
     const collectFilesStartedAt = Date.now()
-    const shouldSkip = createSkipMatcher(effectiveSkip)
     const allFiles = getAllFiles(outDir)
-      .filter((file) => file !== manifestFileName)
-      .filter((file) => !shouldSkip(file))
     debugEntries.push({
       label: '扫描本地文件',
       durationMs: Date.now() - collectFilesStartedAt,
@@ -886,47 +831,6 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
       const retryCount = results.reduce((sum, result) => sum + result.retries, 0)
       const avgSpeed = durationSeconds > 0 ? uploadedBytes / durationSeconds : 0
       const accessUrl = normalizedAlias ? resolveDisplayUrl(normalizedAlias, normalizedUploadPath) : ''
-      let manifestUrl: string | undefined
-
-      if (manifestFileName) {
-        const manifestStartedAt = Date.now()
-        const manifestRelativeFilePath = manifestFileName
-        const manifestFilePath = normalizeSlash(path.resolve(outDir, manifestRelativeFilePath))
-        const manifestRemotePath = normalizeRemotePath(normalizedUploadPath, manifestRelativeFilePath)
-        const manifestRemoteDir = normalizeSlash(path.posix.dirname(manifestRemotePath))
-
-        await mkdir(path.dirname(manifestFilePath), { recursive: true })
-        await writeFile(
-          manifestFilePath,
-          JSON.stringify(createManifestPayload(results, normalizedConfigBase, normalizedAlias), null, 2),
-          'utf8',
-        )
-
-        await preflightClient.ensureDir(manifestRemoteDir)
-        await preflightClient.uploadFrom(manifestFilePath, path.posix.basename(manifestRemotePath))
-        manifestUrl = resolveUploadedFileUrl(
-          manifestRelativeFilePath,
-          manifestRemotePath,
-          normalizedConfigBase,
-          normalizedAlias,
-        )
-
-        if (autoDelete) {
-          try {
-            await unlink(manifestFilePath)
-          } catch {
-            console.warn(`${getLogSymbol('warning')} 删除本地清单失败: ${truncateTerminalText(manifestRelativeFilePath, 18)}`)
-          }
-        }
-
-        if (debug) {
-          debugEntries.push({
-            label: '生成上传清单',
-            durationMs: Date.now() - manifestStartedAt,
-            detail: manifestRelativeFilePath,
-          })
-        }
-      }
 
       clearScreen()
       const resultRows: TerminalRow[] = [
@@ -949,9 +853,6 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
       ]
       if (accessUrl) {
         resultRows.push({ label: '访问:', value: chalk.cyan(accessUrl), preserveValue: true })
-      }
-      if (manifestUrl) {
-        resultRows.push({ label: '清单:', value: chalk.cyan(truncateTerminalText(manifestUrl, 20)) })
       }
 
       if (failedCount > 0) {
@@ -988,7 +889,7 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
         console.log(renderDebugPanel(debugEntries))
       }
 
-      return { name: resultName, totalFiles: results.length, failedCount, manifestUrl }
+      return { name: resultName, totalFiles: results.length, failedCount }
     } catch (error) {
       if (preflightSpinner) preflightSpinner.stop()
 
@@ -1112,7 +1013,6 @@ export const deployFtp = async (option: DeployFtpOption): Promise<DeployFtpResul
     outDir,
     totalFiles,
     failedCount,
-    manifestUrls: deployResults.map((target) => target.manifestUrl).filter((url): url is string => Boolean(url)),
   }
 }
 

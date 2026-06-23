@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import type { Plugin, ResolvedConfig } from 'vite'
 import { deployFtp } from './deploy'
 import type { DeployFtpOption, vitePluginDeployFtpOption } from './types'
-import { ensureTrailingSlash, normalizeSlash, normalizeUrlLikeBase } from './utils/path'
+import { normalizeSlash } from './utils/path'
 
 export { deployFtp }
 export const defineDeployConfig = (option: DeployFtpOption): DeployFtpOption => option
@@ -14,10 +14,6 @@ export type {
   DeployTargetResult,
   FtpConfig,
   FtpConnectConfig,
-  ManifestConfig,
-  ManifestFileItem,
-  ManifestOption,
-  ManifestPayload,
   TempDir,
   UploadResult,
   UploadTask,
@@ -27,13 +23,12 @@ export type {
 } from './types'
 
 export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): Plugin {
-  const { open = true, configBase } = option || {}
+  const { open = true } = option || {}
 
   let buildFailed = false
   let upload = false
   let outDir = normalizeSlash(resolve('dist'))
   let resolvedConfig: ResolvedConfig | null = null
-  const normalizedConfigBase = configBase ? ensureTrailingSlash(normalizeUrlLikeBase(configBase)) : undefined
 
   return {
     name: 'vite-plugin-deploy-ftp',
@@ -46,7 +41,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
       if (!open || buildFailed) return
 
       upload = true
-      config.base = normalizedConfigBase || config.base
       return config
     },
     configResolved(config) {
@@ -61,7 +55,6 @@ export default function vitePluginDeployFtp(option: vitePluginDeployFtpOption): 
 
         await deployFtp({
           ...option,
-          configBase: normalizedConfigBase,
           outDir,
         })
       },
